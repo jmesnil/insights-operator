@@ -1,9 +1,11 @@
 package workloads
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"hash"
 	"os"
@@ -18,8 +20,10 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/scheme"
 	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/remotecommand"
 	"k8s.io/klog/v2"
 
 	"github.com/golang/groupcache/lru"
@@ -79,18 +83,19 @@ func (g *Gatherer) GatherWorkloadInfo(ctx context.Context) ([]record.Record, []e
 		return nil, []error{err}
 	}
 
-	return gatherWorkloadInfo(ctx, gatherKubeClient.CoreV1(), gatherOpenShiftClient)
+	return gatherWorkloadInfo(ctx, gatherKubeClient.CoreV1(), gatherOpenShiftClient, imageConfig)
 }
 
 func gatherWorkloadInfo(
 	ctx context.Context,
 	coreClient corev1client.CoreV1Interface,
 	imageClient imageclient.ImageV1Interface,
+	restConfig *rest.Config,
 ) ([]record.Record, []error) {
 	imageCh, imagesDoneCh := gatherWorkloadImageInfo(ctx, imageClient.Images())
 
 	start := time.Now()
-	limitReached, info, err := workloadInfo(ctx, coreClient, imageCh)
+	limitReached, info, err := workloadInfo(ctx, coreClient, restConfig, imageCh)
 	if err != nil {
 		return nil, []error{err}
 	}
@@ -117,6 +122,7 @@ func gatherWorkloadInfo(
 func workloadInfo(
 	ctx context.Context,
 	coreClient corev1client.CoreV1Interface,
+	restConfig *rest.Config,
 	imageCh chan string,
 ) (bool, workloadPods, error) {
 	defer close(imageCh)
@@ -173,7 +179,7 @@ func workloadInfo(
 				continue
 			}
 
-			podShape, ok := calculatePodShape(h, &pod)
+			podShape, ok := calculatePodShape(h, &pod, coreClient, restConfig)
 			if !ok {
 				namespacePods.InvalidCount++
 				continue
@@ -225,15 +231,19 @@ func podCanBeIgnored(pod *corev1.Pod) bool {
 		len(pod.Status.ContainerStatuses) != len(pod.Spec.Containers)
 }
 
-func calculatePodShape(h hash.Hash, pod *corev1.Pod) (workloadPodShape, bool) {
+func calculatePodShape(h hash.Hash,
+	pod *corev1.Pod,
+	coreClient corev1client.CoreV1Interface,
+	restConfig *rest.Config,
+) (workloadPodShape, bool) {
 	var podShape workloadPodShape
 	var ok bool
-	podShape.InitContainers, ok = calculateWorkloadContainerShapes(h, pod.Spec.InitContainers, pod.Status.InitContainerStatuses, pod.Spec.NodeName)
+	podShape.InitContainers, ok = calculateWorkloadContainerShapes(h, pod.Spec.InitContainers, pod.Status.InitContainerStatuses, pod.Spec.NodeName, coreClient, restConfig)
 	if !ok {
 		return workloadPodShape{}, false
 	}
 
-	podShape.Containers, ok = calculateWorkloadContainerShapes(h, pod.Spec.Containers, pod.Status.ContainerStatuses, pod.Spec.NodeName)
+	podShape.Containers, ok = calculateWorkloadContainerShapes(h, pod.Spec.Containers, pod.Status.ContainerStatuses, pod.Spec.NodeName, coreClient, restConfig)
 	if !ok {
 		return workloadPodShape{}, false
 	}
@@ -467,6 +477,8 @@ func calculateWorkloadContainerShapes(
 	spec []corev1.Container,
 	status []corev1.ContainerStatus,
 	nodeName string,
+	coreClient corev1client.CoreV1Interface,
+	restConfig *rest.Config,
 ) ([]workloadContainerShape, bool) {
 	shapes := make([]workloadContainerShape, 0, len(status))
 	for i := range status {
@@ -497,24 +509,76 @@ func calculateWorkloadContainerShapes(
 			firstArg = shortHash
 		}
 
-		shapes = append(shapes, workloadContainerShape{
-			ImageID:      imageID,
-			FirstCommand: firstCommand,
-			FirstArg:     firstArg,
-		})
-	
 		containerID := status[i].ContainerID
 		fmt.Printf("Scanning container %s with ID %s running on node %s\n", spec[specIndex].Name, containerID, nodeName)
 
 		// 1. find the container-scanner pod for the worker node:
 		//
 		// cs_pod = kubectl get pods --no-headers --namespace openshift-insights --selector=app.kubernetes.io/name=container-scanner  -o custom-columns=":metadata.name"  --field-selector spec.nodeName=$nodeName)
+		containerScannerPod := "container-scanner-ntlpm"
+
 		// 2. scan the container:
-        //
-		// execCommand := "/scan-container " + containerID
-		// kubectl exec --namespace openshift-insights $cs_pod -- $execCommand
 		//
-		// 3. add the output to the workloadContainerShape
+		execCommand := []string{"/scan-container", "cri-o://6d8e6842c5f6f95f7c91d696a0b6121737cdb7e050fe7d82d189f1a8da3b8a16", "--log-level", "trace", "--hash-values", "false"}
+
+		req := coreClient.RESTClient().
+			Post().
+			Namespace("openshift-insights").
+			Name(containerScannerPod).
+			Resource("pods").
+			SubResource("exec").
+			VersionedParams(&corev1.PodExecOptions{
+				Command: execCommand,
+				Stdout:  true,
+				Stderr:  true,
+			}, scheme.ParameterCodec)
+
+		exec, err := remotecommand.NewSPDYExecutor(restConfig, "POST", req.URL())
+		if err != nil {
+			fmt.Printf("error: %s", err)
+		}
+
+		var (
+			execOut bytes.Buffer
+			execErr bytes.Buffer
+		)
+
+		err = exec.Stream(remotecommand.StreamOptions{
+			Stdout: &execOut,
+			Stderr: &execErr,
+			Tty:    false,
+		})
+		if err != nil {
+			fmt.Printf("got scanner error: %s\n", err)
+			fmt.Printf("command error output: %s\n", execErr.String())
+			fmt.Printf("command output: %s\n", execOut.String())
+		} else if execErr.Len() > 0 {
+			fmt.Errorf("command execution got stderr: %v", execErr.String())
+		}
+
+		scannerOutput := execOut.String()
+		fmt.Printf("got scanner output: %s\n", scannerOutput)
+		var result map[string]any
+		json.Unmarshal([]byte(scannerOutput), &result)
+
+		fmt.Printf("got runtime info %s\n", result)
+
+		var runtimeInfo workloadRuntimeInfoContainer
+
+		if len(result) > 0 {
+			runtimeInfo = workloadRuntimeInfoContainer{
+				OsID:        result["os-release-id"].(string),
+				OsVersionID: result["os-release-version-id"].(string),
+			}
+		}
+
+		shapes = append(shapes, workloadContainerShape{
+			ImageID:      imageID,
+			FirstCommand: firstCommand,
+			FirstArg:     firstArg,
+			RuntimeInfo:  runtimeInfo,
+		})
+
 	}
 	return shapes, true
 }

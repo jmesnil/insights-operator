@@ -104,9 +104,9 @@ type workloadContainerShape struct {
 
 type workloadRuntimeInfoContainer struct {
 	// Hash of the identifier of the Operating System (based on /etc/os-release ID)
-	OsId string `json:"osID",omitempty"`
+	OsID string `json:"osID,omitempty"`
 	// Hash of the version identifier of the Operating System (based on /etc/os-release VERSION_ID)
-	OsVersionId string `json:"OsVersionID,omitempty"`
+	OsVersionID string `json:"osVersionID,omitempty"`
 }
 
 type workloadImageInfo struct {
