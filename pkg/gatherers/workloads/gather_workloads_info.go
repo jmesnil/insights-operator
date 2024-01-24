@@ -228,12 +228,12 @@ func podCanBeIgnored(pod *corev1.Pod) bool {
 func calculatePodShape(h hash.Hash, pod *corev1.Pod) (workloadPodShape, bool) {
 	var podShape workloadPodShape
 	var ok bool
-	podShape.InitContainers, ok = calculateWorkloadContainerShapes(h, pod.Spec.InitContainers, pod.Status.InitContainerStatuses)
+	podShape.InitContainers, ok = calculateWorkloadContainerShapes(h, pod.Spec.InitContainers, pod.Status.InitContainerStatuses, pod.Spec.NodeName)
 	if !ok {
 		return workloadPodShape{}, false
 	}
 
-	podShape.Containers, ok = calculateWorkloadContainerShapes(h, pod.Spec.Containers, pod.Status.ContainerStatuses)
+	podShape.Containers, ok = calculateWorkloadContainerShapes(h, pod.Spec.Containers, pod.Status.ContainerStatuses, pod.Spec.NodeName)
 	if !ok {
 		return workloadPodShape{}, false
 	}
@@ -466,6 +466,7 @@ func calculateWorkloadContainerShapes(
 	h hash.Hash,
 	spec []corev1.Container,
 	status []corev1.ContainerStatus,
+	nodeName string,
 ) ([]workloadContainerShape, bool) {
 	shapes := make([]workloadContainerShape, 0, len(status))
 	for i := range status {
@@ -501,6 +502,19 @@ func calculateWorkloadContainerShapes(
 			FirstCommand: firstCommand,
 			FirstArg:     firstArg,
 		})
+	
+		containerID := status[i].ContainerID
+		fmt.Printf("Scanning container %s with ID %s running on node %s\n", spec[specIndex].Name, containerID, nodeName)
+
+		// 1. find the container-scanner pod for the worker node:
+		//
+		// cs_pod = kubectl get pods --no-headers --namespace openshift-insights --selector=app.kubernetes.io/name=container-scanner  -o custom-columns=":metadata.name"  --field-selector spec.nodeName=$nodeName)
+		// 2. scan the container:
+        //
+		// execCommand := "/scan-container " + containerID
+		// kubectl exec --namespace openshift-insights $cs_pod -- $execCommand
+		//
+		// 3. add the output to the workloadContainerShape
 	}
 	return shapes, true
 }

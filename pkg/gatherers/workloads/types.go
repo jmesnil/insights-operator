@@ -98,6 +98,15 @@ type workloadContainerShape struct {
 	// FirstArg is a hash of the first value in the arguments array, if any
 	// was set.
 	FirstArg string `json:"firstArg,omitempty"`
+	// Runtime info on the container
+	RuntimeInfo workloadRuntimeInfoContainer `json:"runtimeInfo,omitempty"`
+}
+
+type workloadRuntimeInfoContainer struct {
+	// Hash of the identifier of the Operating System (based on /etc/os-release ID)
+	OsId string `json:"osID",omitempty"`
+	// Hash of the version identifier of the Operating System (based on /etc/os-release VERSION_ID)
+	OsVersionId string `json:"OsVersionID,omitempty"`
 }
 
 type workloadImageInfo struct {
