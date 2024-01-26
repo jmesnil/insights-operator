@@ -92,10 +92,14 @@ func gatherWorkloadInfo(
 	imageClient imageclient.ImageV1Interface,
 	restConfig *rest.Config,
 ) ([]record.Record, []error) {
+
+	containerScannerPods := getContainerScannerPods(coreClient, restConfig, ctx)
+	fmt.Printf("Scanning containers with pods: %s", containerScannerPods)
+
 	imageCh, imagesDoneCh := gatherWorkloadImageInfo(ctx, imageClient.Images())
 
 	start := time.Now()
-	limitReached, info, err := workloadInfo(ctx, coreClient, restConfig, imageCh)
+	limitReached, info, err := workloadInfo(ctx, coreClient, restConfig, containerScannerPods, imageCh)
 	if err != nil {
 		return nil, []error{err}
 	}
@@ -123,6 +127,7 @@ func workloadInfo(
 	ctx context.Context,
 	coreClient corev1client.CoreV1Interface,
 	restConfig *rest.Config,
+	containerScannerPods map[string]string, 
 	imageCh chan string,
 ) (bool, workloadPods, error) {
 	defer close(imageCh)
@@ -156,6 +161,7 @@ func workloadInfo(
 				}
 				namespace = pod.Namespace
 				namespaceHash = workloadHashString(h, namespace)
+				fmt.Printf("namespace = %s (hash = %s)\n", namespace, namespaceHash)
 				namespacePods = workloadNamespacePods{Shapes: make([]workloadPodShape, 0, 16)}
 			}
 			// we also need to check the number of pods in current namespace, because when
@@ -179,7 +185,7 @@ func workloadInfo(
 				continue
 			}
 
-			podShape, ok := calculatePodShape(h, &pod, coreClient, restConfig)
+			podShape, ok := calculatePodShape(h, &pod, coreClient, restConfig, containerScannerPods)
 			if !ok {
 				namespacePods.InvalidCount++
 				continue
@@ -235,15 +241,16 @@ func calculatePodShape(h hash.Hash,
 	pod *corev1.Pod,
 	coreClient corev1client.CoreV1Interface,
 	restConfig *rest.Config,
+	containerScannerPods map[string]string,
 ) (workloadPodShape, bool) {
 	var podShape workloadPodShape
 	var ok bool
-	podShape.InitContainers, ok = calculateWorkloadContainerShapes(h, pod.Spec.InitContainers, pod.Status.InitContainerStatuses, pod.Spec.NodeName, coreClient, restConfig)
+	podShape.InitContainers, ok = calculateWorkloadContainerShapes(h, pod.Spec.InitContainers, pod.Status.InitContainerStatuses, pod.Spec.NodeName, coreClient, restConfig, containerScannerPods)
 	if !ok {
 		return workloadPodShape{}, false
 	}
 
-	podShape.Containers, ok = calculateWorkloadContainerShapes(h, pod.Spec.Containers, pod.Status.ContainerStatuses, pod.Spec.NodeName, coreClient, restConfig)
+	podShape.Containers, ok = calculateWorkloadContainerShapes(h, pod.Spec.Containers, pod.Status.ContainerStatuses, pod.Spec.NodeName, coreClient, restConfig, containerScannerPods)
 	if !ok {
 		return workloadPodShape{}, false
 	}
@@ -479,6 +486,7 @@ func calculateWorkloadContainerShapes(
 	nodeName string,
 	coreClient corev1client.CoreV1Interface,
 	restConfig *rest.Config,
+	containerScannerPods map[string]string,
 ) ([]workloadContainerShape, bool) {
 	shapes := make([]workloadContainerShape, 0, len(status))
 	for i := range status {
@@ -509,66 +517,86 @@ func calculateWorkloadContainerShapes(
 			firstArg = shortHash
 		}
 
-		containerID := status[i].ContainerID
-		fmt.Printf("Scanning container %s with ID %s running on node %s\n", spec[specIndex].Name, containerID, nodeName)
-
-		// 1. find the container-scanner pod for the worker node:
-		//
-		// cs_pod = kubectl get pods --no-headers --namespace openshift-insights --selector=app.kubernetes.io/name=container-scanner  -o custom-columns=":metadata.name"  --field-selector spec.nodeName=$nodeName)
-		containerScannerPod := "container-scanner-ntlpm"
-
-		// 2. scan the container:
-		//
-		execCommand := []string{"/scan-container", "cri-o://6d8e6842c5f6f95f7c91d696a0b6121737cdb7e050fe7d82d189f1a8da3b8a16", "--log-level", "trace", "--hash-values", "false"}
-
-		req := coreClient.RESTClient().
-			Post().
-			Namespace("openshift-insights").
-			Name(containerScannerPod).
-			Resource("pods").
-			SubResource("exec").
-			VersionedParams(&corev1.PodExecOptions{
-				Command: execCommand,
-				Stdout:  true,
-				Stderr:  true,
-			}, scheme.ParameterCodec)
-
-		exec, err := remotecommand.NewSPDYExecutor(restConfig, "POST", req.URL())
-		if err != nil {
-			fmt.Printf("error: %s", err)
-		}
-
-		var (
-			execOut bytes.Buffer
-			execErr bytes.Buffer
-		)
-
-		err = exec.Stream(remotecommand.StreamOptions{
-			Stdout: &execOut,
-			Stderr: &execErr,
-			Tty:    false,
-		})
-		if err != nil {
-			fmt.Printf("got scanner error: %s\n", err)
-			fmt.Printf("command error output: %s\n", execErr.String())
-			fmt.Printf("command output: %s\n", execOut.String())
-		} else if execErr.Len() > 0 {
-			fmt.Errorf("command execution got stderr: %v", execErr.String())
-		}
-
-		scannerOutput := execOut.String()
-		fmt.Printf("got scanner output: %s\n", scannerOutput)
-		var result map[string]any
-		json.Unmarshal([]byte(scannerOutput), &result)
-
-		fmt.Printf("got runtime info %s\n", result)
-
 		var runtimeInfo workloadRuntimeInfoContainer
 
-		if len(result) > 0 {
-			runtimeInfo = workloadRuntimeInfoContainer{
-				OsID:        result["os-release-id"].(string),
-				OsVersionID: result["os-release-version-id"].(string),
+		containerID := status[i].ContainerID
+		//fmt.Printf("Scanning container %s with ID %s running on node %s\n", spec[specIndex].Name, containerID, nodeName)
+		containerScannerPod, found := containerScannerPods[nodeName]
+		if found {
+			execCommand := []string{"/scan-container", containerID, "--log-level", "trace", "--hash-values", "false"}
+
+			req := coreClient.RESTClient().
+				Post().
+				Namespace("openshift-insights").
+				Name(containerScannerPod).
+				Resource("pods").
+				SubResource("exec").
+				VersionedParams(&corev1.PodExecOptions{
+					Command: execCommand,
+					Stdout:  true,
+					Stderr:  true,
+				}, scheme.ParameterCodec)
+
+			exec, err := remotecommand.NewSPDYExecutor(restConfig, "POST", req.URL())
+			if err != nil {
+				fmt.Printf("error: %s", err)
+			}
+
+			var (
+				execOut bytes.Buffer
+				execErr bytes.Buffer
+			)
+
+			err = exec.Stream(remotecommand.StreamOptions{
+				Stdout: &execOut,
+				Stderr: &execErr,
+				Tty:    false,
+			})
+			if err != nil {
+				fmt.Printf("got scanner error: %s\n", err)
+				fmt.Printf("command error output: %s\n", execErr.String())
+				fmt.Printf("command output: %s\n", execOut.String())
+			} else if execErr.Len() > 0 {
+				fmt.Errorf("command execution got stderr: %v", execErr.String())
+			}
+
+			scannerOutput := execOut.String()
+			var result map[string]any
+			json.Unmarshal([]byte(scannerOutput), &result)
+
+			//fmt.Printf("%s => %s\n",  spec[specIndex].Name, result)
+
+			if len(result) > 0 {
+				runtimeInfo = workloadRuntimeInfoContainer{
+				}
+				osReleaseID, found := result["os-release-id"]
+				if found {
+					runtimeInfo.Os = osReleaseID.(string)
+				}
+				osReleaseVersionID, found := result["os-release-version-id"]
+				if found {
+					runtimeInfo.OsVersion = osReleaseVersionID.(string)
+				}
+				runtimeKind, found := result["runtime-kind"]
+				if found {
+					runtimeInfo.Kind = runtimeKind.(string)
+				}
+				runtimeKindVersion, found := result["runtime-kind-version"]
+				if found {
+					runtimeInfo.KindVersion = runtimeKindVersion.(string)
+				}
+				runtimeKindImplementer, found := result["runtime-kind-implementor"]
+				if found {
+					runtimeInfo.KindImplementer = runtimeKindImplementer.(string)
+				}
+				runtimeName, found := result["runtime-name"]
+				if found {
+					runtimeInfo.Name = runtimeName.(string)
+				}
+				runtimeVersion, found := result["runtime-version"]
+				if found {
+					runtimeInfo.Version = runtimeVersion.(string)
+				}
 			}
 		}
 
@@ -581,6 +609,29 @@ func calculateWorkloadContainerShapes(
 
 	}
 	return shapes, true
+}
+
+func getContainerScannerPods(
+	coreClient corev1client.CoreV1Interface,
+	restConfig *rest.Config,
+	ctx context.Context,
+) map[string]string {
+	namespace := "openshift-insights"
+	labelSelector := "app.kubernetes.io/name=container-scanner"
+
+	containerScannerPods := make(map[string]string)
+
+	pods, err := coreClient.Pods(namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: labelSelector,
+	})
+	if err != nil {
+		return containerScannerPods
+	}
+
+	for _, pod := range pods.Items {
+		containerScannerPods[pod.Spec.NodeName] = pod.Name
+    }
+	return containerScannerPods
 }
 
 // calculateWorkloadInfo converts an image object into the minimal info we

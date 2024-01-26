@@ -104,9 +104,19 @@ type workloadContainerShape struct {
 
 type workloadRuntimeInfoContainer struct {
 	// Hash of the identifier of the Operating System (based on /etc/os-release ID)
-	OsID string `json:"osID,omitempty"`
+	Os string `json:"os,omitempty"`
 	// Hash of the version identifier of the Operating System (based on /etc/os-release VERSION_ID)
-	OsVersionID string `json:"osVersionID,omitempty"`
+	OsVersion string `json:"osVersion,omitempty"`
+	// Identifier of the kind of runtime
+	Kind string `json:"kind,omitempty"`
+	// Version of the kind of runtime
+	KindVersion string `json:"kindVersion,omitempty"`
+	// Entity that provides the runtime-kind implementation 
+	KindImplementer string `json:"kindImplementer,omitempty"`
+	// Name of the runtime used to run the application in the container
+	Name string `json:"name,omitempty"`
+	// The version of the runtime used to run the application
+	Version string `json:"version,omitempty"`
 }
 
 type workloadImageInfo struct {
