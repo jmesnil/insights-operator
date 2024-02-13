@@ -127,7 +127,7 @@ func workloadInfo(
 	ctx context.Context,
 	coreClient corev1client.CoreV1Interface,
 	restConfig *rest.Config,
-	containerScannerPods map[string]string, 
+	containerScannerPods map[string]string,
 	imageCh chan string,
 ) (bool, workloadPods, error) {
 	defer close(imageCh)
@@ -519,85 +519,13 @@ func calculateWorkloadContainerShapes(
 
 		var runtimeInfo workloadRuntimeInfoContainer
 
-		containerID := status[i].ContainerID
-		//fmt.Printf("Scanning container %s with ID %s running on node %s\n", spec[specIndex].Name, containerID, nodeName)
 		containerScannerPod, found := containerScannerPods[nodeName]
 		if found {
-			execCommand := []string{"/scan-container", containerID, "--log-level", "trace", "--hash-values", "false"}
-
-			req := coreClient.RESTClient().
-				Post().
-				Namespace("openshift-insights").
-				Name(containerScannerPod).
-				Resource("pods").
-				SubResource("exec").
-				VersionedParams(&corev1.PodExecOptions{
-					Command: execCommand,
-					Stdout:  true,
-					Stderr:  true,
-				}, scheme.ParameterCodec)
-
-			exec, err := remotecommand.NewSPDYExecutor(restConfig, "POST", req.URL())
-			if err != nil {
-				fmt.Printf("error: %s", err)
-			}
-
-			var (
-				execOut bytes.Buffer
-				execErr bytes.Buffer
-			)
-
-			err = exec.Stream(remotecommand.StreamOptions{
-				Stdout: &execOut,
-				Stderr: &execErr,
-				Tty:    false,
-			})
-			if err != nil {
-				fmt.Printf("got scanner error: %s\n", err)
-				fmt.Printf("command error output: %s\n", execErr.String())
-				fmt.Printf("command output: %s\n", execOut.String())
-			} else if execErr.Len() > 0 {
-				fmt.Errorf("command execution got stderr: %v", execErr.String())
-			}
-
-			scannerOutput := execOut.String()
-			var result map[string]any
-			json.Unmarshal([]byte(scannerOutput), &result)
-
-			//fmt.Printf("%s => %s\n",  spec[specIndex].Name, result)
-
-			if len(result) > 0 {
-				runtimeInfo = workloadRuntimeInfoContainer{
-				}
-				osReleaseID, found := result["os-release-id"]
-				if found {
-					runtimeInfo.Os = osReleaseID.(string)
-				}
-				osReleaseVersionID, found := result["os-release-version-id"]
-				if found {
-					runtimeInfo.OsVersion = osReleaseVersionID.(string)
-				}
-				runtimeKind, found := result["runtime-kind"]
-				if found {
-					runtimeInfo.Kind = runtimeKind.(string)
-				}
-				runtimeKindVersion, found := result["runtime-kind-version"]
-				if found {
-					runtimeInfo.KindVersion = runtimeKindVersion.(string)
-				}
-				runtimeKindImplementer, found := result["runtime-kind-implementor"]
-				if found {
-					runtimeInfo.KindImplementer = runtimeKindImplementer.(string)
-				}
-				runtimeName, found := result["runtime-name"]
-				if found {
-					runtimeInfo.Name = runtimeName.(string)
-				}
-				runtimeVersion, found := result["runtime-version"]
-				if found {
-					runtimeInfo.Version = runtimeVersion.(string)
-				}
-			}
+			containerID := status[i].ContainerID
+			runtimeInfo = getWorkloadRuntimeInfoContainer(containerID,
+				containerScannerPod,
+				coreClient,
+				restConfig)
 		}
 
 		shapes = append(shapes, workloadContainerShape{
@@ -609,6 +537,89 @@ func calculateWorkloadContainerShapes(
 
 	}
 	return shapes, true
+}
+
+func getWorkloadRuntimeInfoContainer(containerID string,
+	containerScannerPod string,
+	coreClient corev1client.CoreV1Interface,
+	restConfig *rest.Config,
+) workloadRuntimeInfoContainer {
+	//fmt.Printf("Scanning container %s with ID %s running on node %s\n", spec[specIndex].Name, containerID, nodeName)
+	execCommand := []string{"/scan-container", containerID, "--log-level", "trace", "--hash-values", "false"}
+
+	req := coreClient.RESTClient().
+		Post().
+		Namespace("openshift-insights").
+		Name(containerScannerPod).
+		Resource("pods").
+		SubResource("exec").
+		VersionedParams(&corev1.PodExecOptions{
+			Command: execCommand,
+			Stdout:  true,
+			Stderr:  true,
+		}, scheme.ParameterCodec)
+
+	exec, err := remotecommand.NewSPDYExecutor(restConfig, "POST", req.URL())
+	if err != nil {
+		fmt.Printf("error: %s", err)
+	}
+
+	var (
+		execOut bytes.Buffer
+		execErr bytes.Buffer
+	)
+
+	err = exec.Stream(remotecommand.StreamOptions{
+		Stdout: &execOut,
+		Stderr: &execErr,
+		Tty:    false,
+	})
+	if err != nil {
+		fmt.Printf("got scanner error: %s\n", err)
+		fmt.Printf("command error output: %s\n", execErr.String())
+		fmt.Printf("command output: %s\n", execOut.String())
+	} else if execErr.Len() > 0 {
+		fmt.Errorf("command execution got stderr: %v", execErr.String())
+	}
+
+	scannerOutput := execOut.String()
+	var result map[string]any
+	json.Unmarshal([]byte(scannerOutput), &result)
+
+	var runtimeInfo workloadRuntimeInfoContainer
+
+	if len(result) > 0 {
+		runtimeInfo = workloadRuntimeInfoContainer{}
+		osReleaseID, found := result["os-release-id"]
+		if found {
+			runtimeInfo.Os = osReleaseID.(string)
+		}
+		osReleaseVersionID, found := result["os-release-version-id"]
+		if found {
+			runtimeInfo.OsVersion = osReleaseVersionID.(string)
+		}
+		runtimeKind, found := result["runtime-kind"]
+		if found {
+			runtimeInfo.Kind = runtimeKind.(string)
+		}
+		runtimeKindVersion, found := result["runtime-kind-version"]
+		if found {
+			runtimeInfo.KindVersion = runtimeKindVersion.(string)
+		}
+		runtimeKindImplementer, found := result["runtime-kind-implementor"]
+		if found {
+			runtimeInfo.KindImplementer = runtimeKindImplementer.(string)
+		}
+		runtimeName, found := result["runtime-name"]
+		if found {
+			runtimeInfo.Name = runtimeName.(string)
+		}
+		runtimeVersion, found := result["runtime-version"]
+		if found {
+			runtimeInfo.Version = runtimeVersion.(string)
+		}
+	}
+	return runtimeInfo
 }
 
 func getContainerScannerPods(
@@ -630,7 +641,7 @@ func getContainerScannerPods(
 
 	for _, pod := range pods.Items {
 		containerScannerPods[pod.Spec.NodeName] = pod.Name
-    }
+	}
 	return containerScannerPods
 }
 

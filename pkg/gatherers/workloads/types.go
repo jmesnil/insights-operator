@@ -111,7 +111,7 @@ type workloadRuntimeInfoContainer struct {
 	Kind string `json:"kind,omitempty"`
 	// Version of the kind of runtime
 	KindVersion string `json:"kindVersion,omitempty"`
-	// Entity that provides the runtime-kind implementation 
+	// Entity that provides the runtime-kind implementation
 	KindImplementer string `json:"kindImplementer,omitempty"`
 	// Name of the runtime used to run the application in the container
 	Name string `json:"name,omitempty"`
