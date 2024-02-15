@@ -1,0 +1,10 @@
+FROM redhat/ubi9-minimal
+
+RUN microdnf update -y && microdnf -y install \
+    tar
+
+COPY ./bin/insights-operator /insights-operator
+COPY config/local.yaml /etc/insights-operator/local.yaml
+COPY manifests /manifests
+
+ENTRYPOINT ["sleep", "360000"]
