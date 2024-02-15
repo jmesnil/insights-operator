@@ -93,13 +93,13 @@ func gatherWorkloadInfo(
 	restConfig *rest.Config,
 ) ([]record.Record, []error) {
 
-	containerScannerPods := getContainerScannerPods(coreClient, restConfig, ctx)
-	fmt.Printf("Scanning containers with pods: %s", containerScannerPods)
+	containerScannerPodIPs := getContainerScannerPodIPs(coreClient, restConfig, ctx)
+	fmt.Printf("Scanning containers with pods at: %s", containerScannerPodIPs)
 
 	imageCh, imagesDoneCh := gatherWorkloadImageInfo(ctx, imageClient.Images())
 
 	start := time.Now()
-	limitReached, info, err := workloadInfo(ctx, coreClient, restConfig, containerScannerPods, imageCh)
+	limitReached, info, err := workloadInfo(ctx, coreClient, containerScannerPodIPs, imageCh)
 	if err != nil {
 		return nil, []error{err}
 	}
@@ -126,8 +126,7 @@ func gatherWorkloadInfo(
 func workloadInfo(
 	ctx context.Context,
 	coreClient corev1client.CoreV1Interface,
-	restConfig *rest.Config,
-	containerScannerPods map[string]string,
+	containerScannerPodIPs map[string]string,
 	imageCh chan string,
 ) (bool, workloadPods, error) {
 	defer close(imageCh)
@@ -185,7 +184,7 @@ func workloadInfo(
 				continue
 			}
 
-			podShape, ok := calculatePodShape(h, &pod, coreClient, restConfig, containerScannerPods)
+			podShape, ok := calculatePodShape(h, &pod, containerScannerPodIPs)
 			if !ok {
 				namespacePods.InvalidCount++
 				continue
@@ -239,18 +238,16 @@ func podCanBeIgnored(pod *corev1.Pod) bool {
 
 func calculatePodShape(h hash.Hash,
 	pod *corev1.Pod,
-	coreClient corev1client.CoreV1Interface,
-	restConfig *rest.Config,
-	containerScannerPods map[string]string,
+	containerScannerPodIPs map[string]string,
 ) (workloadPodShape, bool) {
 	var podShape workloadPodShape
 	var ok bool
-	podShape.InitContainers, ok = calculateWorkloadContainerShapes(h, pod.Spec.InitContainers, pod.Status.InitContainerStatuses, pod.Spec.NodeName, coreClient, restConfig, containerScannerPods)
+	podShape.InitContainers, ok = calculateWorkloadContainerShapes(h, pod.Spec.InitContainers, pod.Status.InitContainerStatuses, pod.Spec.NodeName, containerScannerPodIPs)
 	if !ok {
 		return workloadPodShape{}, false
 	}
 
-	podShape.Containers, ok = calculateWorkloadContainerShapes(h, pod.Spec.Containers, pod.Status.ContainerStatuses, pod.Spec.NodeName, coreClient, restConfig, containerScannerPods)
+	podShape.Containers, ok = calculateWorkloadContainerShapes(h, pod.Spec.Containers, pod.Status.ContainerStatuses, pod.Spec.NodeName, containerScannerPodIPs)
 	if !ok {
 		return workloadPodShape{}, false
 	}
@@ -484,9 +481,7 @@ func calculateWorkloadContainerShapes(
 	spec []corev1.Container,
 	status []corev1.ContainerStatus,
 	nodeName string,
-	coreClient corev1client.CoreV1Interface,
-	restConfig *rest.Config,
-	containerScannerPods map[string]string,
+	containerScannerPodIPs map[string]string,
 ) ([]workloadContainerShape, bool) {
 	shapes := make([]workloadContainerShape, 0, len(status))
 	for i := range status {
@@ -519,13 +514,10 @@ func calculateWorkloadContainerShapes(
 
 		var runtimeInfo workloadRuntimeInfoContainer
 
-		containerScannerPod, found := containerScannerPods[nodeName]
+		containerScannerPodIP, found := containerScannerPodIPs[nodeName]
 		if found {
 			containerID := status[i].ContainerID
-			runtimeInfo = getWorkloadRuntimeInfoContainer(containerID,
-				containerScannerPod,
-				coreClient,
-				restConfig)
+			runtimeInfo = getWorkloadRuntimeInfoContainer(containerID, containerScannerPodIP)
 		}
 
 		shapes = append(shapes, workloadContainerShape{
@@ -541,8 +533,6 @@ func calculateWorkloadContainerShapes(
 
 func getWorkloadRuntimeInfoContainer(containerID string,
 	containerScannerPodIP string,
-	coreClient corev1client.CoreV1Interface,
-	restConfig *rest.Config,
 ) workloadRuntimeInfoContainer {
 	startTime := time.Now()
 
@@ -621,7 +611,7 @@ func getWorkloadRuntimeInfoContainer(containerID string,
 	return runtimeInfo
 }
 
-func getContainerScannerPods(
+func getContainerScannerPodIPs(
 	coreClient corev1client.CoreV1Interface,
 	restConfig *rest.Config,
 	ctx context.Context,
