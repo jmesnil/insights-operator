@@ -1,13 +1,15 @@
 package workloads
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"hash"
+	"io/ioutil"
+	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -20,10 +22,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/kubernetes/scheme"
 	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/remotecommand"
 	"k8s.io/klog/v2"
 
 	"github.com/golang/groupcache/lru"
@@ -540,53 +540,51 @@ func calculateWorkloadContainerShapes(
 }
 
 func getWorkloadRuntimeInfoContainer(containerID string,
-	containerScannerPod string,
+	containerScannerPodIP string,
 	coreClient corev1client.CoreV1Interface,
 	restConfig *rest.Config,
 ) workloadRuntimeInfoContainer {
-	//fmt.Printf("Scanning container %s with ID %s running on node %s\n", spec[specIndex].Name, containerID, nodeName)
-	execCommand := []string{"/scan-container", containerID, "--log-level", "trace", "--hash-values", "false"}
-
-	req := coreClient.RESTClient().
-		Post().
-		Namespace("openshift-insights").
-		Name(containerScannerPod).
-		Resource("pods").
-		SubResource("exec").
-		VersionedParams(&corev1.PodExecOptions{
-			Command: execCommand,
-			Stdout:  true,
-			Stderr:  true,
-		}, scheme.ParameterCodec)
-
-	exec, err := remotecommand.NewSPDYExecutor(restConfig, "POST", req.URL())
-	if err != nil {
-		fmt.Printf("error: %s", err)
-	}
-
-	var (
-		execOut bytes.Buffer
-		execErr bytes.Buffer
-	)
-
-	err = exec.Stream(remotecommand.StreamOptions{
-		Stdout: &execOut,
-		Stderr: &execErr,
-		Tty:    false,
-	})
-	if err != nil {
-		fmt.Printf("got scanner error: %s\n", err)
-		fmt.Printf("command error output: %s\n", execErr.String())
-		fmt.Printf("command output: %s\n", execOut.String())
-	} else if execErr.Len() > 0 {
-		fmt.Errorf("command execution got stderr: %v", execErr.String())
-	}
-
-	scannerOutput := execOut.String()
-	var result map[string]any
-	json.Unmarshal([]byte(scannerOutput), &result)
+	startTime := time.Now()
 
 	var runtimeInfo workloadRuntimeInfoContainer
+
+	// Base URL
+	baseURL := "http://" + containerScannerPodIP + ":8000/?"
+
+	// Parse the base URL
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		fmt.Println("Error parsing URL:", err)
+		return runtimeInfo
+	}
+	params := url.Values{}
+	params.Add("cid", containerID)
+	u.RawQuery = params.Encode()
+
+	resp, err := http.Get(u.String())
+	if err != nil {
+		fmt.Println("Error sending request:", err)
+		return runtimeInfo
+	}
+	defer resp.Body.Close()
+
+	// Read and print the response body
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		fmt.Println("Error reading response body:", err)
+		return runtimeInfo
+	}
+
+	scannerOutput := string(body)
+
+	endTime := time.Now()
+	// Calculate the duration
+	duration := endTime.Sub(startTime)
+	// Display the execution time
+	fmt.Printf("Executed scanning in %s\n", duration)
+
+	var result map[string]any
+	json.Unmarshal([]byte(scannerOutput), &result)
 
 	if len(result) > 0 {
 		runtimeInfo = workloadRuntimeInfoContainer{}
@@ -619,6 +617,7 @@ func getWorkloadRuntimeInfoContainer(containerID string,
 			runtimeInfo.Version = runtimeVersion.(string)
 		}
 	}
+
 	return runtimeInfo
 }
 
@@ -640,7 +639,7 @@ func getContainerScannerPods(
 	}
 
 	for _, pod := range pods.Items {
-		containerScannerPods[pod.Spec.NodeName] = pod.Name
+		containerScannerPods[pod.Spec.NodeName] = pod.Status.PodIP
 	}
 	return containerScannerPods
 }
