@@ -517,7 +517,7 @@ func calculateWorkloadContainerShapes(
 		containerScannerPodIP, found := containerScannerPodIPs[nodeName]
 		if found {
 			containerID := status[i].ContainerID
-			runtimeInfo = getWorkloadRuntimeInfoContainer(containerID, containerScannerPodIP)
+			runtimeInfo = getWorkloadRuntimeInfoContainer(h, containerID, containerScannerPodIP)
 		}
 
 		shapes = append(shapes, workloadContainerShape{
@@ -531,7 +531,8 @@ func calculateWorkloadContainerShapes(
 	return shapes, true
 }
 
-func getWorkloadRuntimeInfoContainer(containerID string,
+func getWorkloadRuntimeInfoContainer(h hash.Hash,
+	containerID string,
 	containerScannerPodIP string,
 ) workloadRuntimeInfoContainer {
 	startTime := time.Now()
@@ -580,31 +581,31 @@ func getWorkloadRuntimeInfoContainer(containerID string,
 		runtimeInfo = workloadRuntimeInfoContainer{}
 		osReleaseID, found := result["os-release-id"]
 		if found {
-			runtimeInfo.Os = osReleaseID.(string)
+			runtimeInfo.Os = workloadHashString(h, osReleaseID.(string))
 		}
 		osReleaseVersionID, found := result["os-release-version-id"]
 		if found {
-			runtimeInfo.OsVersion = osReleaseVersionID.(string)
+			runtimeInfo.OsVersion = workloadHashString(h, osReleaseVersionID.(string))
 		}
 		runtimeKind, found := result["runtime-kind"]
 		if found {
-			runtimeInfo.Kind = runtimeKind.(string)
+			runtimeInfo.Kind = workloadHashString(h, runtimeKind.(string))
 		}
 		runtimeKindVersion, found := result["runtime-kind-version"]
 		if found {
-			runtimeInfo.KindVersion = runtimeKindVersion.(string)
+			runtimeInfo.KindVersion = workloadHashString(h, runtimeKindVersion.(string))
 		}
 		runtimeKindImplementer, found := result["runtime-kind-implementor"]
 		if found {
-			runtimeInfo.KindImplementer = runtimeKindImplementer.(string)
+			runtimeInfo.KindImplementer = workloadHashString(h, runtimeKindImplementer.(string))
 		}
 		runtimeName, found := result["runtime-name"]
 		if found {
-			runtimeInfo.Name = runtimeName.(string)
+			runtimeInfo.Name = workloadHashString(h, runtimeName.(string))
 		}
 		runtimeVersion, found := result["runtime-version"]
 		if found {
-			runtimeInfo.Version = runtimeVersion.(string)
+			runtimeInfo.Version = workloadHashString(h, runtimeVersion.(string))
 		}
 	}
 
