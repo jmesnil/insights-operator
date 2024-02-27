@@ -33,6 +33,14 @@ spec:
           # Replace the image field it is is coming from another image registry
           image: quay.io/jmesnil/container-scanner:rust-latest
           imagePullPolicy: Always
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: 8000
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: 8000
           env:
             - name: CONTAINER_RUNTIME_ENDPOINT
               value: unix:///crio.sock

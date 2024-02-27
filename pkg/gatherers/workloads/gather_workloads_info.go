@@ -540,7 +540,7 @@ func getWorkloadRuntimeInfoContainer(h hash.Hash,
 	var runtimeInfo workloadRuntimeInfoContainer
 
 	// Base URL
-	baseURL := "http://" + containerScannerPodIP + ":8000/?"
+	baseURL := "http://" + containerScannerPodIP + ":8000/scan?"
 
 	// Parse the base URL
 	u, err := url.Parse(baseURL)
