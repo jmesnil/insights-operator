@@ -41,6 +41,10 @@ spec:
             httpGet:
               path: /health/ready
               port: 8000
+          resources:
+            requests:
+              memory: "20Mi"
+              cpu: "250m"
           env:
             - name: CONTAINER_RUNTIME_ENDPOINT
               value: unix:///crio.sock
