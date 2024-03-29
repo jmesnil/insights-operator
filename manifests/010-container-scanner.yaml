@@ -1,15 +1,7 @@
----
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: container-scanner-sa
-  namespace: openshift-insights
----
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
   name: container-scanner
-  namespace: openshift-insights
   labels:
     app.kubernetes.io/name: container-scanner
 spec:
@@ -33,14 +25,6 @@ spec:
           # Replace the image field it is is coming from another image registry
           image: quay.io/jmesnil/container-scanner:rust-latest
           imagePullPolicy: Always
-          livenessProbe:
-            httpGet:
-              path: /health/live
-              port: 8000
-          readinessProbe:
-            httpGet:
-              path: /health/ready
-              port: 8000
           resources:
             requests:
               memory: "20Mi"

@@ -1,15 +1,13 @@
 package workloads
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"hash"
-	"io/ioutil"
-	"net/http"
-	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -22,8 +20,10 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/scheme"
 	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/remotecommand"
 	"k8s.io/klog/v2"
 
 	"github.com/golang/groupcache/lru"
@@ -92,14 +92,18 @@ func gatherWorkloadInfo(
 	imageClient imageclient.ImageV1Interface,
 	restConfig *rest.Config,
 ) ([]record.Record, []error) {
+	h := sha256.New()
 
-	containerScannerPodIPs := getContainerScannerPodIPs(coreClient, restConfig, ctx)
-	fmt.Printf("Scanning containers with pods at: %s", containerScannerPodIPs)
+	containerScannerPods := getContainerScannerPods(coreClient, restConfig, ctx)
+	fmt.Printf("Scanning containers with pods at: %s", containerScannerPods)
 
-	imageCh, imagesDoneCh := gatherWorkloadImageInfo(ctx, imageClient.Images())
+	workloadRuntimeInfos := getAllWorkloadRuntimeInfoContainer(coreClient, restConfig, containerScannerPods, h)
+	fmt.Printf("Gather all workload runtime infos: %s", workloadRuntimeInfos)
+
+	imageCh, imagesDoneCh := gatherWorkloadImageInfo(ctx, h, imageClient.Images())
 
 	start := time.Now()
-	limitReached, info, err := workloadInfo(ctx, coreClient, containerScannerPodIPs, imageCh)
+	limitReached, info, err := workloadInfo(ctx, coreClient, workloadRuntimeInfos, imageCh)
 	if err != nil {
 		return nil, []error{err}
 	}
@@ -126,7 +130,7 @@ func gatherWorkloadInfo(
 func workloadInfo(
 	ctx context.Context,
 	coreClient corev1client.CoreV1Interface,
-	containerScannerPodIPs map[string]string,
+	workloadRuntimesInfos map[string]map[string]map[string]workloadRuntimeInfoContainer,
 	imageCh chan string,
 ) (bool, workloadPods, error) {
 	defer close(imageCh)
@@ -184,7 +188,7 @@ func workloadInfo(
 				continue
 			}
 
-			podShape, ok := calculatePodShape(h, &pod, containerScannerPodIPs)
+			podShape, ok := calculatePodShape(h, &pod, coreClient, workloadRuntimesInfos)
 			if !ok {
 				namespacePods.InvalidCount++
 				continue
@@ -238,16 +242,17 @@ func podCanBeIgnored(pod *corev1.Pod) bool {
 
 func calculatePodShape(h hash.Hash,
 	pod *corev1.Pod,
-	containerScannerPodIPs map[string]string,
+	coreClient corev1client.CoreV1Interface,
+	workloadRuntimesInfos map[string]map[string]map[string]workloadRuntimeInfoContainer,
 ) (workloadPodShape, bool) {
 	var podShape workloadPodShape
 	var ok bool
-	podShape.InitContainers, ok = calculateWorkloadContainerShapes(h, pod.Spec.InitContainers, pod.Status.InitContainerStatuses, pod.Spec.NodeName, containerScannerPodIPs)
+	podShape.InitContainers, ok = calculateWorkloadContainerShapes(h, coreClient, pod.Spec.InitContainers, pod.Status.InitContainerStatuses, pod.ObjectMeta, workloadRuntimesInfos)
 	if !ok {
 		return workloadPodShape{}, false
 	}
 
-	podShape.Containers, ok = calculateWorkloadContainerShapes(h, pod.Spec.Containers, pod.Status.ContainerStatuses, pod.Spec.NodeName, containerScannerPodIPs)
+	podShape.Containers, ok = calculateWorkloadContainerShapes(h, coreClient, pod.Spec.Containers, pod.Status.ContainerStatuses, pod.ObjectMeta, workloadRuntimesInfos)
 	if !ok {
 		return workloadPodShape{}, false
 	}
@@ -293,6 +298,7 @@ func handleWorkloadImageInfo(
 // nolint: gocritic
 func gatherWorkloadImageInfo(
 	ctx context.Context,
+	h hash.Hash,
 	imageClient imageclient.ImageInterface,
 ) (chan string, <-chan workloadImageInfo) {
 	images := make(map[string]workloadImage)
@@ -300,8 +306,6 @@ func gatherWorkloadImageInfo(
 	imagesDoneCh := make(chan workloadImageInfo)
 
 	go func() {
-		h := sha256.New()
-
 		defer func() {
 			count := len(images)
 			for k, v := range images {
@@ -478,10 +482,11 @@ func idForImageReference(s string) string {
 // can't be met (invalid status, no imageID) false is returned.
 func calculateWorkloadContainerShapes(
 	h hash.Hash,
+	coreClient corev1client.CoreV1Interface,
 	spec []corev1.Container,
 	status []corev1.ContainerStatus,
-	nodeName string,
-	containerScannerPodIPs map[string]string,
+	podMeta metav1.ObjectMeta,
+	workloadRuntimesInfos map[string]map[string]map[string]workloadRuntimeInfoContainer,
 ) ([]workloadContainerShape, bool) {
 	shapes := make([]workloadContainerShape, 0, len(status))
 	for i := range status {
@@ -514,10 +519,17 @@ func calculateWorkloadContainerShapes(
 
 		var runtimeInfo workloadRuntimeInfoContainer
 
-		containerScannerPodIP, found := containerScannerPodIPs[nodeName]
-		if found {
-			containerID := status[i].ContainerID
-			runtimeInfo = getWorkloadRuntimeInfoContainer(h, containerID, containerScannerPodIP)
+		// FIXME, the container ID should stay opaque and returns as is by the container scanner
+		containerID := strings.TrimPrefix(status[i].ContainerID, "cri-o://")
+
+		if workloadNamespaces, ok := workloadRuntimesInfos[podMeta.Namespace]; ok {
+			if workloadPods, ok := workloadNamespaces[podMeta.Name]; ok {
+				// FIXME, the container ID should stay opaque and returns as is by the container scanner
+				if workloadContainer, ok := workloadPods[containerID]; ok {
+					fmt.Printf("found runtime info for container %s: %s", containerID, workloadContainer)
+					runtimeInfo = workloadContainer
+				}
+			}
 		}
 
 		shapes = append(shapes, workloadContainerShape{
@@ -531,42 +543,17 @@ func calculateWorkloadContainerShapes(
 	return shapes, true
 }
 
-func getWorkloadRuntimeInfoContainer(h hash.Hash,
-	containerID string,
-	containerScannerPodIP string,
-) workloadRuntimeInfoContainer {
+type containerScannerRuntimeInfo struct {
+	// Hash of the identifier of the Operating System (based on /etc/os-release ID)
+	OsReleaseId string `json:"os-release-id,omitempty"`
+}
+
+func getAllWorkloadRuntimeInfoContainer(coreClient corev1client.CoreV1Interface,
+	restConfig *rest.Config,
+	containerScannerMap map[string]string,
+	h hash.Hash,
+) map[string]map[string]map[string]workloadRuntimeInfoContainer {
 	startTime := time.Now()
-
-	var runtimeInfo workloadRuntimeInfoContainer
-
-	// Base URL
-	baseURL := "http://" + containerScannerPodIP + ":8000/scan?"
-
-	// Parse the base URL
-	u, err := url.Parse(baseURL)
-	if err != nil {
-		fmt.Println("Error parsing URL:", err)
-		return runtimeInfo
-	}
-	params := url.Values{}
-	params.Add("cid", containerID)
-	u.RawQuery = params.Encode()
-
-	resp, err := http.Get(u.String())
-	if err != nil {
-		fmt.Println("Error sending request:", err)
-		return runtimeInfo
-	}
-	defer resp.Body.Close()
-
-	// Read and print the response body
-	body, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		fmt.Println("Error reading response body:", err)
-		return runtimeInfo
-	}
-
-	scannerOutput := string(body)
 
 	endTime := time.Now()
 	// Calculate the duration
@@ -574,45 +561,142 @@ func getWorkloadRuntimeInfoContainer(h hash.Hash,
 	// Display the execution time
 	fmt.Printf("Executed scanning in %s\n", duration)
 
-	var result map[string]any
-	json.Unmarshal([]byte(scannerOutput), &result)
+	globalResult := make(map[string]map[string]map[string]workloadRuntimeInfoContainer)
 
-	if len(result) > 0 {
-		runtimeInfo = workloadRuntimeInfoContainer{}
-		osReleaseID, found := result["os-release-id"]
-		if found {
-			runtimeInfo.Os = workloadHashString(h, osReleaseID.(string))
+	execCommand := []string{"/scan-containers", "--log-level", "trace", "--hash-values", "false"}
+
+	for nodeName, containerScannerPod := range containerScannerMap {
+		fmt.Printf("Scanning node %s from %s\n", nodeName, containerScannerPod)
+
+		req := coreClient.RESTClient().
+			Post().
+			Namespace("openshift-insights").
+			Name(containerScannerPod).
+			Resource("pods").
+			SubResource("exec").
+			VersionedParams(&corev1.PodExecOptions{
+				Command: execCommand,
+				Stdout:  true,
+				Stderr:  true,
+			}, scheme.ParameterCodec)
+
+		exec, err := remotecommand.NewSPDYExecutor(restConfig, "POST", req.URL())
+		if err != nil {
+			fmt.Printf("error: %s", err)
 		}
-		osReleaseVersionID, found := result["os-release-version-id"]
-		if found {
-			runtimeInfo.OsVersion = workloadHashString(h, osReleaseVersionID.(string))
+
+		var (
+			execOut bytes.Buffer
+			execErr bytes.Buffer
+		)
+
+		err = exec.Stream(remotecommand.StreamOptions{
+			Stdout: &execOut,
+			Stderr: &execErr,
+			Tty:    false,
+		})
+		if err != nil {
+			fmt.Printf("got scanner error: %s\n", err)
+			fmt.Printf("command error output: %s\n", execErr.String())
+			fmt.Printf("command output: %s\n", execOut.String())
+		} else if execErr.Len() > 0 {
+			fmt.Errorf("command execution got stderr: %v", execErr.String())
 		}
-		runtimeKind, found := result["runtime-kind"]
-		if found {
-			runtimeInfo.Kind = workloadHashString(h, runtimeKind.(string))
-		}
-		runtimeKindVersion, found := result["runtime-kind-version"]
-		if found {
-			runtimeInfo.KindVersion = workloadHashString(h, runtimeKindVersion.(string))
-		}
-		runtimeKindImplementer, found := result["runtime-kind-implementor"]
-		if found {
-			runtimeInfo.KindImplementer = workloadHashString(h, runtimeKindImplementer.(string))
-		}
-		runtimeName, found := result["runtime-name"]
-		if found {
-			runtimeInfo.Name = workloadHashString(h, runtimeName.(string))
-		}
-		runtimeVersion, found := result["runtime-version"]
-		if found {
-			runtimeInfo.Version = workloadHashString(h, runtimeVersion.(string))
-		}
+
+		scannerOutput := execOut.String()
+
+		var nodeOutput map[string]map[string]map[string]map[string]any
+		json.Unmarshal([]byte(scannerOutput), &nodeOutput)
+
+		endTime := time.Now()
+		// Calculate the duration
+		duration := endTime.Sub(startTime)
+		// Display the execution time
+		fmt.Printf("Executed scanning in %s\n", duration)
+
+		// transform & merge the results
+		nodeResult := transformWorkload(h, nodeOutput)
+		mergeWorkloads(globalResult, nodeResult)
+
 	}
-
-	return runtimeInfo
+	fmt.Printf("Got global result %s\n", globalResult)
+	return globalResult
 }
 
-func getContainerScannerPodIPs(
+func transformWorkload(h hash.Hash,
+	node map[string]map[string]map[string]map[string]any,
+) map[string]map[string]map[string]workloadRuntimeInfoContainer {
+
+	result := make(map[string]map[string]map[string]workloadRuntimeInfoContainer)
+
+	for podNamespace, podWorkloads := range node {
+		result[podNamespace] = make(map[string]map[string]workloadRuntimeInfoContainer)
+		for podName, containerWorkloads := range podWorkloads {
+			result[podNamespace][podName] = make(map[string]workloadRuntimeInfoContainer)
+			for containerID, info := range containerWorkloads {
+				runtimeInfo := workloadRuntimeInfoContainer{}
+				osReleaseID, found := info["os-release-id"]
+				if found {
+					runtimeInfo.Os = workloadHashString(h, osReleaseID.(string))
+				}
+				osReleaseVersionID, found := info["os-release-version-id"]
+				if found {
+					runtimeInfo.OsVersion = workloadHashString(h, osReleaseVersionID.(string))
+				}
+				runtimeKind, found := info["runtime-kind"]
+				if found {
+					runtimeInfo.Kind = workloadHashString(h, runtimeKind.(string))
+				}
+				runtimeKindVersion, found := info["runtime-kind-version"]
+				if found {
+					runtimeInfo.KindVersion = workloadHashString(h, runtimeKindVersion.(string))
+				}
+				runtimeKindImplementer, found := info["runtime-kind-implementor"]
+				if found {
+					runtimeInfo.KindImplementer = workloadHashString(h, runtimeKindImplementer.(string))
+				}
+				runtimeName, found := info["runtime-name"]
+				if found {
+					runtimeInfo.Name = workloadHashString(h, runtimeName.(string))
+				}
+				runtimeVersion, found := info["runtime-version"]
+				if found {
+					runtimeInfo.Version = workloadHashString(h, runtimeVersion.(string))
+				}
+				result[podNamespace][podName][containerID] = runtimeInfo
+
+			}
+		}
+	}
+	return result
+}
+
+// Merge the node workloads in the global map
+func mergeWorkloads(global map[string]map[string]map[string]workloadRuntimeInfoContainer,
+	node map[string]map[string]map[string]workloadRuntimeInfoContainer,
+) {
+	for namespace, nodePodWorkloads := range node {
+		if _, exists := global[namespace]; !exists {
+			// If the namespace doesn't exist in global, simply assign the value from node.
+			global[namespace] = nodePodWorkloads
+		} else {
+			// If the namespace exists, check the pods
+			for podName, containerWorkloads := range nodePodWorkloads {
+				if _, exists := global[namespace][podName]; !exists {
+					// If the namespace/pod doesn't exist in the global map, assign the value from the node.
+					global[namespace][podName] = containerWorkloads
+				} else {
+					// add the workload from the node
+					for containerID, runtimeInfo := range containerWorkloads {
+						global[namespace][podName][containerID] = runtimeInfo
+					}
+				}
+			}
+		}
+	}
+}
+
+func getContainerScannerPods(
 	coreClient corev1client.CoreV1Interface,
 	restConfig *rest.Config,
 	ctx context.Context,
@@ -630,7 +714,7 @@ func getContainerScannerPodIPs(
 	}
 
 	for _, pod := range pods.Items {
-		containerScannerPods[pod.Spec.NodeName] = pod.Status.PodIP
+		containerScannerPods[pod.Spec.NodeName] = pod.ObjectMeta.Name
 	}
 	return containerScannerPods
 }
