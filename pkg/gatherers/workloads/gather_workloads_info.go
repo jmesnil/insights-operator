@@ -45,6 +45,10 @@ const (
 	podsLimit = 8000
 )
 
+var (
+	workloadRuntimeInfos map[string]map[string]map[string]workloadRuntimeInfoContainer
+)
+
 // GatherWorkloadInfo Collects summarized info about the workloads on a cluster
 // in a generic fashion
 //
@@ -97,13 +101,13 @@ func gatherWorkloadInfo(
 	containerScannerPods := getContainerScannerPods(coreClient, restConfig, ctx)
 	fmt.Printf("Scanning containers with pods at: %s", containerScannerPods)
 
-	workloadRuntimeInfos := getAllWorkloadRuntimeInfoContainer(coreClient, restConfig, containerScannerPods, h)
+	workloadRuntimeInfos = getAllWorkloadRuntimeInfoContainer(coreClient, restConfig, containerScannerPods, h)
 	fmt.Printf("Gather all workload runtime infos: %s", workloadRuntimeInfos)
 
 	imageCh, imagesDoneCh := gatherWorkloadImageInfo(ctx, h, imageClient.Images())
 
 	start := time.Now()
-	limitReached, info, err := workloadInfo(ctx, coreClient, workloadRuntimeInfos, imageCh)
+	limitReached, info, err := workloadInfo(ctx, coreClient, imageCh)
 	if err != nil {
 		return nil, []error{err}
 	}
@@ -130,7 +134,6 @@ func gatherWorkloadInfo(
 func workloadInfo(
 	ctx context.Context,
 	coreClient corev1client.CoreV1Interface,
-	workloadRuntimesInfos map[string]map[string]map[string]workloadRuntimeInfoContainer,
 	imageCh chan string,
 ) (bool, workloadPods, error) {
 	defer close(imageCh)
@@ -188,7 +191,7 @@ func workloadInfo(
 				continue
 			}
 
-			podShape, ok := calculatePodShape(h, &pod, coreClient, workloadRuntimesInfos)
+			podShape, ok := calculatePodShape(h, &pod)
 			if !ok {
 				namespacePods.InvalidCount++
 				continue
@@ -242,17 +245,15 @@ func podCanBeIgnored(pod *corev1.Pod) bool {
 
 func calculatePodShape(h hash.Hash,
 	pod *corev1.Pod,
-	coreClient corev1client.CoreV1Interface,
-	workloadRuntimesInfos map[string]map[string]map[string]workloadRuntimeInfoContainer,
 ) (workloadPodShape, bool) {
 	var podShape workloadPodShape
 	var ok bool
-	podShape.InitContainers, ok = calculateWorkloadContainerShapes(h, coreClient, pod.Spec.InitContainers, pod.Status.InitContainerStatuses, pod.ObjectMeta, workloadRuntimesInfos)
+	podShape.InitContainers, ok = calculateWorkloadContainerShapes(h, pod.Spec.InitContainers, pod.Status.InitContainerStatuses, pod.ObjectMeta)
 	if !ok {
 		return workloadPodShape{}, false
 	}
 
-	podShape.Containers, ok = calculateWorkloadContainerShapes(h, coreClient, pod.Spec.Containers, pod.Status.ContainerStatuses, pod.ObjectMeta, workloadRuntimesInfos)
+	podShape.Containers, ok = calculateWorkloadContainerShapes(h, pod.Spec.Containers, pod.Status.ContainerStatuses, pod.ObjectMeta)
 	if !ok {
 		return workloadPodShape{}, false
 	}
@@ -482,11 +483,9 @@ func idForImageReference(s string) string {
 // can't be met (invalid status, no imageID) false is returned.
 func calculateWorkloadContainerShapes(
 	h hash.Hash,
-	coreClient corev1client.CoreV1Interface,
 	spec []corev1.Container,
 	status []corev1.ContainerStatus,
 	podMeta metav1.ObjectMeta,
-	workloadRuntimesInfos map[string]map[string]map[string]workloadRuntimeInfoContainer,
 ) ([]workloadContainerShape, bool) {
 	shapes := make([]workloadContainerShape, 0, len(status))
 	for i := range status {
@@ -522,7 +521,7 @@ func calculateWorkloadContainerShapes(
 		// FIXME, the container ID should stay opaque and returns as is by the container scanner
 		containerID := strings.TrimPrefix(status[i].ContainerID, "cri-o://")
 
-		if workloadNamespaces, ok := workloadRuntimesInfos[podMeta.Namespace]; ok {
+		if workloadNamespaces, ok := workloadRuntimeInfos[podMeta.Namespace]; ok {
 			if workloadPods, ok := workloadNamespaces[podMeta.Name]; ok {
 				// FIXME, the container ID should stay opaque and returns as is by the container scanner
 				if workloadContainer, ok := workloadPods[containerID]; ok {
@@ -543,23 +542,12 @@ func calculateWorkloadContainerShapes(
 	return shapes, true
 }
 
-type containerScannerRuntimeInfo struct {
-	// Hash of the identifier of the Operating System (based on /etc/os-release ID)
-	OsReleaseId string `json:"os-release-id,omitempty"`
-}
-
 func getAllWorkloadRuntimeInfoContainer(coreClient corev1client.CoreV1Interface,
 	restConfig *rest.Config,
 	containerScannerMap map[string]string,
 	h hash.Hash,
 ) map[string]map[string]map[string]workloadRuntimeInfoContainer {
 	startTime := time.Now()
-
-	endTime := time.Now()
-	// Calculate the duration
-	duration := endTime.Sub(startTime)
-	// Display the execution time
-	fmt.Printf("Executed scanning in %s\n", duration)
 
 	globalResult := make(map[string]map[string]map[string]workloadRuntimeInfoContainer)
 
