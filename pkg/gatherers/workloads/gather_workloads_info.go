@@ -101,7 +101,7 @@ func gatherWorkloadInfo(
 ) ([]record.Record, []error) {
 	h := sha256.New()
 
-	workloadRuntimeInfos = gatherWorkloadRuntimeInfos(ctx, coreClient, restConfig, h)
+	workloadRuntimeInfos = gatherWorkloadRuntimeInfos(ctx, h, coreClient, restConfig)
 
 	imageCh, imagesDoneCh := gatherWorkloadImageInfo(ctx, h, imageClient.Images())
 
@@ -244,12 +244,12 @@ func podCanBeIgnored(pod *corev1.Pod) bool {
 func calculatePodShape(h hash.Hash, pod *corev1.Pod) (workloadPodShape, bool) {
 	var podShape workloadPodShape
 	var ok bool
-	podShape.InitContainers, ok = calculateWorkloadContainerShapes(h, pod.Spec.InitContainers, pod.Status.InitContainerStatuses, pod.ObjectMeta)
+	podShape.InitContainers, ok = calculateWorkloadContainerShapes(h, pod.ObjectMeta, pod.Spec.InitContainers, pod.Status.InitContainerStatuses)
 	if !ok {
 		return workloadPodShape{}, false
 	}
 
-	podShape.Containers, ok = calculateWorkloadContainerShapes(h, pod.Spec.Containers, pod.Status.ContainerStatuses, pod.ObjectMeta)
+	podShape.Containers, ok = calculateWorkloadContainerShapes(h, pod.ObjectMeta, pod.Spec.Containers, pod.Status.ContainerStatuses)
 	if !ok {
 		return workloadPodShape{}, false
 	}
@@ -479,9 +479,9 @@ func idForImageReference(s string) string {
 // can't be met (invalid status, no imageID) false is returned.
 func calculateWorkloadContainerShapes(
 	h hash.Hash,
+	podMeta metav1.ObjectMeta,
 	spec []corev1.Container,
 	status []corev1.ContainerStatus,
-	podMeta metav1.ObjectMeta,
 ) ([]workloadContainerShape, bool) {
 	shapes := make([]workloadContainerShape, 0, len(status))
 	for i := range status {
@@ -538,15 +538,15 @@ func calculateWorkloadContainerShapes(
 
 func gatherWorkloadRuntimeInfos(
 	ctx context.Context,
+	h hash.Hash,
 	coreClient corev1client.CoreV1Interface,
 	restConfig *rest.Config,
-	h hash.Hash,
 ) workloadRuntimes {
 	start := time.Now()
 
 	containerScannerPods := getContainerScannerPods(coreClient, restConfig, ctx)
 
-	workloadCh := make(chan workloadRuntimes)
+	nodeWorkloadCh := make(chan workloadRuntimes)
 	var wg sync.WaitGroup
 	wg.Add(len(containerScannerPods))
 
@@ -554,31 +554,31 @@ func gatherWorkloadRuntimeInfos(
 		go func(nodeName string, containerScannerPod string) {
 			defer wg.Done()
 			klog.Infof("Gather workload runtime for node %s using %s\n", nodeName, containerScannerPod)
-			workloadCh <- getNodeWorkloadRuntimeInfos(coreClient, restConfig, containerScannerPod, h)
+			nodeWorkloadCh <- getNodeWorkloadRuntimeInfos(h, coreClient, restConfig, containerScannerPod)
 		}(nodeName, containerScannerPod)
 	}
 	go func() {
 		wg.Wait()
-		close(workloadCh)
+		close(nodeWorkloadCh)
 	}()
 
-	globalResult := make(workloadRuntimes)
+	workloadRuntimeInfos := make(workloadRuntimes)
 
-	for workload := range workloadCh {
-		mergeWorkloads(globalResult, workload)
+	for infos := range nodeWorkloadCh {
+		mergeWorkloads(workloadRuntimeInfos, infos)
 	}
 
 	klog.Infof("Gather workload runtime infos in %s\n",
 		time.Since(start).Round(time.Second).String())
 
-	return globalResult
+	return workloadRuntimeInfos
 }
 
 // Get all WorkloadRuntimeInfos for a single Node (using the container scanner pod running on this node)
-func getNodeWorkloadRuntimeInfos(coreClient corev1client.CoreV1Interface,
+func getNodeWorkloadRuntimeInfos(h hash.Hash,
+	coreClient corev1client.CoreV1Interface,
 	restConfig *rest.Config,
 	containerScannerPod string,
-	h hash.Hash,
 ) workloadRuntimes {
 	execCommand := []string{"/scan-containers", "--log-level", "trace"}
 
