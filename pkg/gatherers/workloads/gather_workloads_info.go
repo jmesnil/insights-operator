@@ -45,8 +45,11 @@ const (
 	podsLimit = 8000
 )
 
+// keys are namespace / pod / containerID and the final value is the workloadRuntimeInfoContainer for this container
+type workloadRuntimes map[string]map[string]map[string]workloadRuntimeInfoContainer
+
 var (
-	workloadRuntimeInfos map[string]map[string]map[string]workloadRuntimeInfoContainer
+	workloadRuntimeInfos workloadRuntimes
 )
 
 // GatherWorkloadInfo Collects summarized info about the workloads on a cluster
@@ -99,9 +102,8 @@ func gatherWorkloadInfo(
 	h := sha256.New()
 
 	containerScannerPods := getContainerScannerPods(coreClient, restConfig, ctx)
-	fmt.Printf("Scanning containers with pods at: %s", containerScannerPods)
 
-	workloadRuntimeInfos = getAllWorkloadRuntimeInfoContainer(coreClient, restConfig, containerScannerPods, h)
+	workloadRuntimeInfos = gatherWorkloadRuntimeInfos(coreClient, restConfig, containerScannerPods, h)
 
 	imageCh, imagesDoneCh := gatherWorkloadImageInfo(ctx, h, imageClient.Images())
 
@@ -166,7 +168,6 @@ func workloadInfo(
 				}
 				namespace = pod.Namespace
 				namespaceHash = workloadHashString(h, namespace)
-				fmt.Printf("namespace = %s (hash = %s)\n", namespace, namespaceHash)
 				namespacePods = workloadNamespacePods{Shapes: make([]workloadPodShape, 0, 16)}
 			}
 			// we also need to check the number of pods in current namespace, because when
@@ -539,37 +540,46 @@ func calculateWorkloadContainerShapes(
 	return shapes, true
 }
 
-func getAllWorkloadRuntimeInfoContainer(coreClient corev1client.CoreV1Interface,
+func gatherWorkloadRuntimeInfos(coreClient corev1client.CoreV1Interface,
 	restConfig *rest.Config,
 	containerScannerMap map[string]string,
 	h hash.Hash,
-) map[string]map[string]map[string]workloadRuntimeInfoContainer {
+) workloadRuntimes {
 	startTime := time.Now()
 
-	globalResult := make(map[string]map[string]map[string]workloadRuntimeInfoContainer)
+	workloadCh := make(chan workloadRuntimes)
+	var wg sync.WaitGroup
+	wg.Add(len(containerScannerMap))
 
 	for _, containerScannerPod := range containerScannerMap {
-		result := getNodeWorkloadRuntimeInfos(coreClient, restConfig, containerScannerPod, h)
-		mergeWorkloads(globalResult, result)
+		go func() {
+			defer wg.Done()
+			workloadCh <- getNodeWorkloadRuntimeInfos(coreClient, restConfig, containerScannerPod, h)
+		}()
+	}
+	go func() {
+		wg.Wait()
+		close(workloadCh)
+	}()
+
+	globalResult := make(workloadRuntimes)
+
+	for workload := range workloadCh {
+		mergeWorkloads(globalResult, workload)
 	}
 
-	endTime := time.Now()
-	// Calculate the duration
-	duration := endTime.Sub(startTime)
-	// Display the execution time
-	fmt.Printf("Executed scanning in %s\n", duration)
+	fmt.Printf("Executed scanning in %s\n", time.Now().Sub(startTime))
 
 	return globalResult
 }
 
+// Get all WorkloadRuntimeInfos for a single Node (using the container scanner pod running on this node)
 func getNodeWorkloadRuntimeInfos(coreClient corev1client.CoreV1Interface,
 	restConfig *rest.Config,
 	containerScannerPod string,
 	h hash.Hash,
-) map[string]map[string]map[string]workloadRuntimeInfoContainer {
-	startTime := time.Now()
-
-	execCommand := []string{"/scan-containers", "--log-level", "trace", "--hash-values", "false"}
+) workloadRuntimes {
+	execCommand := []string{"/scan-containers", "--log-level", "trace"}
 
 	req := coreClient.RESTClient().
 		Post().
@@ -587,7 +597,6 @@ func getNodeWorkloadRuntimeInfos(coreClient corev1client.CoreV1Interface,
 	if err != nil {
 		fmt.Printf("error: %s", err)
 	}
-
 	var (
 		execOut bytes.Buffer
 		execErr bytes.Buffer
@@ -610,24 +619,14 @@ func getNodeWorkloadRuntimeInfos(coreClient corev1client.CoreV1Interface,
 
 	var nodeOutput map[string]map[string]map[string]map[string]any
 	json.Unmarshal([]byte(scannerOutput), &nodeOutput)
-
-	// transform & merge the results
-	nodeResult := transformWorkload(h, nodeOutput)
-
-	endTime := time.Now()
-	// Calculate the duration
-	duration := endTime.Sub(startTime)
-	// Display the execution time
-	fmt.Printf("Executed node scanning in %s\n", duration)
-
-	return nodeResult
+	return transformWorkload(h, nodeOutput)
 }
 
 func transformWorkload(h hash.Hash,
 	node map[string]map[string]map[string]map[string]any,
-) map[string]map[string]map[string]workloadRuntimeInfoContainer {
+) workloadRuntimes {
 
-	result := make(map[string]map[string]map[string]workloadRuntimeInfoContainer)
+	result := make(workloadRuntimes)
 
 	for podNamespace, podWorkloads := range node {
 		result[podNamespace] = make(map[string]map[string]workloadRuntimeInfoContainer)
@@ -672,8 +671,8 @@ func transformWorkload(h hash.Hash,
 }
 
 // Merge the node workloads in the global map
-func mergeWorkloads(global map[string]map[string]map[string]workloadRuntimeInfoContainer,
-	node map[string]map[string]map[string]workloadRuntimeInfoContainer,
+func mergeWorkloads(global workloadRuntimes,
+	node workloadRuntimes,
 ) {
 	for namespace, nodePodWorkloads := range node {
 		if _, exists := global[namespace]; !exists {
