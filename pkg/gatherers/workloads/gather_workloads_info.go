@@ -102,7 +102,6 @@ func gatherWorkloadInfo(
 	fmt.Printf("Scanning containers with pods at: %s", containerScannerPods)
 
 	workloadRuntimeInfos = getAllWorkloadRuntimeInfoContainer(coreClient, restConfig, containerScannerPods, h)
-	fmt.Printf("Gather all workload runtime infos: %s", workloadRuntimeInfos)
 
 	imageCh, imagesDoneCh := gatherWorkloadImageInfo(ctx, h, imageClient.Images())
 
@@ -523,9 +522,7 @@ func calculateWorkloadContainerShapes(
 
 		if workloadNamespaces, ok := workloadRuntimeInfos[podMeta.Namespace]; ok {
 			if workloadPods, ok := workloadNamespaces[podMeta.Name]; ok {
-				// FIXME, the container ID should stay opaque and returns as is by the container scanner
 				if workloadContainer, ok := workloadPods[containerID]; ok {
-					fmt.Printf("found runtime info for container %s: %s", containerID, workloadContainer)
 					runtimeInfo = workloadContainer
 				}
 			}
@@ -551,64 +548,79 @@ func getAllWorkloadRuntimeInfoContainer(coreClient corev1client.CoreV1Interface,
 
 	globalResult := make(map[string]map[string]map[string]workloadRuntimeInfoContainer)
 
+	for _, containerScannerPod := range containerScannerMap {
+		result := getNodeWorkloadRuntimeInfos(coreClient, restConfig, containerScannerPod, h)
+		mergeWorkloads(globalResult, result)
+	}
+
+	endTime := time.Now()
+	// Calculate the duration
+	duration := endTime.Sub(startTime)
+	// Display the execution time
+	fmt.Printf("Executed scanning in %s\n", duration)
+
+	return globalResult
+}
+
+func getNodeWorkloadRuntimeInfos(coreClient corev1client.CoreV1Interface,
+	restConfig *rest.Config,
+	containerScannerPod string,
+	h hash.Hash,
+) map[string]map[string]map[string]workloadRuntimeInfoContainer {
+	startTime := time.Now()
+
 	execCommand := []string{"/scan-containers", "--log-level", "trace", "--hash-values", "false"}
 
-	for nodeName, containerScannerPod := range containerScannerMap {
-		fmt.Printf("Scanning node %s from %s\n", nodeName, containerScannerPod)
+	req := coreClient.RESTClient().
+		Post().
+		Namespace("openshift-insights").
+		Name(containerScannerPod).
+		Resource("pods").
+		SubResource("exec").
+		VersionedParams(&corev1.PodExecOptions{
+			Command: execCommand,
+			Stdout:  true,
+			Stderr:  true,
+		}, scheme.ParameterCodec)
 
-		req := coreClient.RESTClient().
-			Post().
-			Namespace("openshift-insights").
-			Name(containerScannerPod).
-			Resource("pods").
-			SubResource("exec").
-			VersionedParams(&corev1.PodExecOptions{
-				Command: execCommand,
-				Stdout:  true,
-				Stderr:  true,
-			}, scheme.ParameterCodec)
-
-		exec, err := remotecommand.NewSPDYExecutor(restConfig, "POST", req.URL())
-		if err != nil {
-			fmt.Printf("error: %s", err)
-		}
-
-		var (
-			execOut bytes.Buffer
-			execErr bytes.Buffer
-		)
-
-		err = exec.Stream(remotecommand.StreamOptions{
-			Stdout: &execOut,
-			Stderr: &execErr,
-			Tty:    false,
-		})
-		if err != nil {
-			fmt.Printf("got scanner error: %s\n", err)
-			fmt.Printf("command error output: %s\n", execErr.String())
-			fmt.Printf("command output: %s\n", execOut.String())
-		} else if execErr.Len() > 0 {
-			fmt.Errorf("command execution got stderr: %v", execErr.String())
-		}
-
-		scannerOutput := execOut.String()
-
-		var nodeOutput map[string]map[string]map[string]map[string]any
-		json.Unmarshal([]byte(scannerOutput), &nodeOutput)
-
-		endTime := time.Now()
-		// Calculate the duration
-		duration := endTime.Sub(startTime)
-		// Display the execution time
-		fmt.Printf("Executed scanning in %s\n", duration)
-
-		// transform & merge the results
-		nodeResult := transformWorkload(h, nodeOutput)
-		mergeWorkloads(globalResult, nodeResult)
-
+	exec, err := remotecommand.NewSPDYExecutor(restConfig, "POST", req.URL())
+	if err != nil {
+		fmt.Printf("error: %s", err)
 	}
-	fmt.Printf("Got global result %s\n", globalResult)
-	return globalResult
+
+	var (
+		execOut bytes.Buffer
+		execErr bytes.Buffer
+	)
+
+	err = exec.Stream(remotecommand.StreamOptions{
+		Stdout: &execOut,
+		Stderr: &execErr,
+		Tty:    false,
+	})
+	if err != nil {
+		fmt.Printf("got scanner error: %s\n", err)
+		fmt.Printf("command error output: %s\n", execErr.String())
+		fmt.Printf("command output: %s\n", execOut.String())
+	} else if execErr.Len() > 0 {
+		fmt.Errorf("command execution got stderr: %v", execErr.String())
+	}
+
+	scannerOutput := execOut.String()
+
+	var nodeOutput map[string]map[string]map[string]map[string]any
+	json.Unmarshal([]byte(scannerOutput), &nodeOutput)
+
+	// transform & merge the results
+	nodeResult := transformWorkload(h, nodeOutput)
+
+	endTime := time.Now()
+	// Calculate the duration
+	duration := endTime.Sub(startTime)
+	// Display the execution time
+	fmt.Printf("Executed node scanning in %s\n", duration)
+
+	return nodeResult
 }
 
 func transformWorkload(h hash.Hash,
