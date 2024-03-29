@@ -101,9 +101,7 @@ func gatherWorkloadInfo(
 ) ([]record.Record, []error) {
 	h := sha256.New()
 
-	containerScannerPods := getContainerScannerPods(coreClient, restConfig, ctx)
-
-	workloadRuntimeInfos = gatherWorkloadRuntimeInfos(coreClient, restConfig, containerScannerPods, h)
+	workloadRuntimeInfos = gatherWorkloadRuntimeInfos(ctx, coreClient, restConfig, h)
 
 	imageCh, imagesDoneCh := gatherWorkloadImageInfo(ctx, h, imageClient.Images())
 
@@ -243,9 +241,7 @@ func podCanBeIgnored(pod *corev1.Pod) bool {
 		len(pod.Status.ContainerStatuses) != len(pod.Spec.Containers)
 }
 
-func calculatePodShape(h hash.Hash,
-	pod *corev1.Pod,
-) (workloadPodShape, bool) {
+func calculatePodShape(h hash.Hash, pod *corev1.Pod) (workloadPodShape, bool) {
 	var podShape workloadPodShape
 	var ok bool
 	podShape.InitContainers, ok = calculateWorkloadContainerShapes(h, pod.Spec.InitContainers, pod.Status.InitContainerStatuses, pod.ObjectMeta)
@@ -540,22 +536,26 @@ func calculateWorkloadContainerShapes(
 	return shapes, true
 }
 
-func gatherWorkloadRuntimeInfos(coreClient corev1client.CoreV1Interface,
+func gatherWorkloadRuntimeInfos(
+	ctx context.Context,
+	coreClient corev1client.CoreV1Interface,
 	restConfig *rest.Config,
-	containerScannerMap map[string]string,
 	h hash.Hash,
 ) workloadRuntimes {
-	startTime := time.Now()
+	start := time.Now()
+
+	containerScannerPods := getContainerScannerPods(coreClient, restConfig, ctx)
 
 	workloadCh := make(chan workloadRuntimes)
 	var wg sync.WaitGroup
-	wg.Add(len(containerScannerMap))
+	wg.Add(len(containerScannerPods))
 
-	for _, containerScannerPod := range containerScannerMap {
-		go func() {
+	for nodeName, containerScannerPod := range containerScannerPods {
+		go func(nodeName string, containerScannerPod string) {
 			defer wg.Done()
+			klog.Infof("Gather workload runtime for node %s using %s\n", nodeName, containerScannerPod)
 			workloadCh <- getNodeWorkloadRuntimeInfos(coreClient, restConfig, containerScannerPod, h)
-		}()
+		}(nodeName, containerScannerPod)
 	}
 	go func() {
 		wg.Wait()
@@ -568,7 +568,8 @@ func gatherWorkloadRuntimeInfos(coreClient corev1client.CoreV1Interface,
 		mergeWorkloads(globalResult, workload)
 	}
 
-	fmt.Printf("Executed scanning in %s\n", time.Now().Sub(startTime))
+	klog.Infof("Gather workload runtime infos in %s\n",
+		time.Since(start).Round(time.Second).String())
 
 	return globalResult
 }
@@ -619,6 +620,7 @@ func getNodeWorkloadRuntimeInfos(coreClient corev1client.CoreV1Interface,
 
 	var nodeOutput map[string]map[string]map[string]map[string]any
 	json.Unmarshal([]byte(scannerOutput), &nodeOutput)
+
 	return transformWorkload(h, nodeOutput)
 }
 
