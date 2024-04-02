@@ -514,11 +514,11 @@ func calculateWorkloadContainerShapes(
 
 		var runtimeInfo workloadRuntimeInfoContainer
 
-		// FIXME, the container ID should stay opaque and returns as is by the container scanner
-		containerID := strings.TrimPrefix(status[i].ContainerID, "cri-o://")
-
-		if workloadNamespaces, ok := workloadRuntimeInfos[podMeta.Namespace]; ok {
-			if workloadPods, ok := workloadNamespaces[podMeta.Name]; ok {
+		podNamespace := podMeta.Namespace
+		podName := podMeta.Name
+		containerID := status[i].ContainerID
+		if workloadNamespaces, ok := workloadRuntimeInfos[podNamespace]; ok {
+			if workloadPods, ok := workloadNamespaces[podName]; ok {
 				if workloadContainer, ok := workloadPods[containerID]; ok {
 					runtimeInfo = workloadContainer
 				}
