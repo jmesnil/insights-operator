@@ -52,11 +52,11 @@ metadata:
   name: insights-operator-container-scanner
 rules:
   - apiGroups:
-      - ''
+      - ""
     verbs:
       - create
     resources:
-      - pod/exec
+      - pods/exec
   - apiGroups:
       - apps
     verbs:

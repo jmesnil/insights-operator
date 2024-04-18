@@ -6,6 +6,6 @@ operator_pod=$(kubectl get pods -n openshift-insights   --selector=app=insights-
 
 echo $operator_pod
 
-kubectl exec --namespace $CS_NAMESPACE $operator_pod -- /insights-operator gather --config /etc/insights-operator/local.yaml
+kubectl exec --namespace $CS_NAMESPACE $operator_pod -- /usr/bin/insights-operator gather --config /etc/insights-operator/server.yaml
 
-kubectl cp -n $CS_NAMESPACE $operator_pod:/tmp/insights-operator /tmp/insights-operator
+kubectl cp -n $CS_NAMESPACE $operator_pod:/var/lib/insights-operator/ /tmp/insights-operator

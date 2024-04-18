@@ -3,6 +3,12 @@ kind: Deployment
 metadata:
   name: insights-operator-with-container-scanner
   namespace: openshift-insights
+  annotations:
+    config.openshift.io/inject-proxy: insights-operator
+    exclude.release.openshift.io/internal-openshift-hosted: "true"
+    include.release.openshift.io/self-managed-high-availability: "true"
+    include.release.openshift.io/single-node-developer: "true"
+    capability.openshift.io/name: Insights
 spec:
   strategy:
     type: Recreate
@@ -11,6 +17,9 @@ spec:
       app: insights-operator-with-container-scanner
   template:
     metadata:
+      annotations:
+        target.workload.openshift.io/management: '{"effect": "PreferredDuringScheduling"}'
+        openshift.io/required-scc: restricted-v2
       labels:
         app: insights-operator-with-container-scanner
     spec:
@@ -19,6 +28,19 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       serviceAccountName: operator
+      priorityClassName: system-cluster-critical
+      tolerations:
+      - effect: NoSchedule
+        key: node-role.kubernetes.io/master
+        operator: Exists
+      - effect: NoExecute
+        key: node.kubernetes.io/unreachable
+        operator: Exists
+        tolerationSeconds: 900
+      - effect: NoExecute
+        key: node.kubernetes.io/not-ready
+        operator: Exists
+        tolerationSeconds: 900
       volumes:
       - name: snapshots
         emptyDir: {}
@@ -62,7 +84,7 @@ spec:
         resources:
           requests:
             cpu: 10m
-            memory: 30Mi
+            memory: 54Mi
         env:
         - name: POD_NAME
           valueFrom:

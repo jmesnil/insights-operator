@@ -42,8 +42,9 @@ func gatherWorkloadRuntimeInfos(
 	if _, err := appClient.DaemonSets(namespace).Create(ctx, containerScannerDaemonSet, metav1.CreateOptions{}); err != nil {
 		return workloadRuntimeInfos, err
 	}
-	err := apimachinerywait.PollUntilContextCancel(ctx, time.Second*5, true, podsReady(coreClient, labelSelector))
+	err := apimachinerywait.PollUntilContextTimeout(ctx, time.Second*3, time.Minute*3, true, podsReady(coreClient, labelSelector))
 	if err != nil {
+		klog.Infof("error waiting for readiness %s\n", err)
 		return workloadRuntimeInfos, err
 	}
 	klog.Infof("Container Scanner deployed and ready")
@@ -144,7 +145,14 @@ func podsReady(coreClient corev1client.CoreV1Interface, selector string) apimach
 		if err != nil {
 			return false, err
 		}
-		done := true
+
+		totalPods := len(pods.Items)
+
+		if totalPods == 0 {
+			return false, nil
+		}
+
+		readyPods := 0
 		for _, pod := range pods.Items {
 			podReady := false
 			for _, cond := range pod.Status.Conditions {
@@ -153,11 +161,11 @@ func podsReady(coreClient corev1client.CoreV1Interface, selector string) apimach
 					break
 				}
 			}
-			if !podReady {
-				done = false
+			if podReady {
+				readyPods++
 			}
 		}
-		return done, nil
+		return totalPods == readyPods, nil
 	}
 }
 
