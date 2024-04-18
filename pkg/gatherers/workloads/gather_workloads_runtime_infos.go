@@ -22,6 +22,10 @@ import (
 	"k8s.io/klog/v2"
 )
 
+var (
+	labelSelector = "app.kubernetes.io/name=container-scanner"
+)
+
 func gatherWorkloadRuntimeInfos(
 	ctx context.Context,
 	h hash.Hash,
@@ -38,8 +42,7 @@ func gatherWorkloadRuntimeInfos(
 	if _, err := appClient.DaemonSets(namespace).Create(ctx, containerScannerDaemonSet, metav1.CreateOptions{}); err != nil {
 		return workloadRuntimeInfos, err
 	}
-	klog.Infof("Container scanner deployed, waiting to be ready\n")
-	err := apimachinerywait.PollUntilContextCancel(ctx, time.Second*5, true, podsReady(coreClient, "app.kubernetes.io/name=container-scanner"))
+	err := apimachinerywait.PollUntilContextCancel(ctx, time.Second*5, true, podsReady(coreClient, labelSelector))
 	if err != nil {
 		return workloadRuntimeInfos, err
 	}
@@ -54,7 +57,7 @@ func gatherWorkloadRuntimeInfos(
 	for nodeName, containerScannerPod := range containerScannerPods {
 		go func(nodeName string, containerScannerPod string) {
 			defer wg.Done()
-			klog.Infof("Gather workload runtime for node %s using %s\n", nodeName, containerScannerPod)
+			klog.Infof("Gathering workload runtime info for node %s...\n", nodeName)
 			nodeWorkloadCh <- getNodeWorkloadRuntimeInfos(h, coreClient, restConfig, containerScannerPod)
 		}(nodeName, containerScannerPod)
 	}
@@ -162,8 +165,6 @@ func getContainerScannerPods(
 	coreClient corev1client.CoreV1Interface,
 	ctx context.Context,
 ) map[string]string {
-	labelSelector := "app.kubernetes.io/name=container-scanner"
-
 	containerScannerPods := make(map[string]string)
 
 	pods, err := coreClient.Pods(namespace).List(ctx, metav1.ListOptions{
