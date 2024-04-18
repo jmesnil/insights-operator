@@ -42,6 +42,8 @@ func gatherWorkloadRuntimeInfos(
 	if _, err := appClient.DaemonSets(namespace).Create(ctx, containerScannerDaemonSet, metav1.CreateOptions{}); err != nil {
 		return workloadRuntimeInfos, err
 	}
+	defer undeployContainerScanner(ctx, appClient)
+
 	err := apimachinerywait.PollUntilContextTimeout(ctx, time.Second*3, time.Minute*3, true, podsReady(coreClient, labelSelector))
 	if err != nil {
 		klog.Infof("error waiting for readiness %s\n", err)
@@ -71,25 +73,28 @@ func gatherWorkloadRuntimeInfos(
 		mergeWorkloads(workloadRuntimeInfos, infos)
 	}
 
-	err = appClient.DaemonSets(namespace).Delete(ctx, "container-scanner", metav1.DeleteOptions{})
-	if err != nil {
-		return workloadRuntimeInfos, err
-	}
-	klog.Infof("Undeployed container scanner\n")
-
 	klog.Infof("Gather workload runtime infos in %s\n",
 		time.Since(start).Round(time.Second).String())
 
 	return workloadRuntimeInfos, nil
 }
 
+func undeployContainerScanner(ctx context.Context, appClient appsv1client.AppsV1Interface) error {
+	klog.Infof("Undeploy container scanner\n")
+	return appClient.DaemonSets(namespace).Delete(ctx, "container-scanner", metav1.DeleteOptions{})
+}
+
 func newContainerScannerDaemonSet() *appsv1.DaemonSet {
 	securityContextPrivileged := true
 	hostPathSocket := corev1.HostPathSocket
 	labels := map[string]string{"app.kubernetes.io/name": "container-scanner"}
+	annotations := map[string]string{"openshift.io/required-scc": "container-scanner-scc"}
 
 	return &appsv1.DaemonSet{
-		ObjectMeta: metav1.ObjectMeta{Name: "container-scanner", Namespace: namespace},
+		ObjectMeta: metav1.ObjectMeta{Name: "container-scanner",
+			Namespace:   namespace,
+			Annotations: annotations,
+		},
 		Spec: appsv1.DaemonSetSpec{
 			Selector: &metav1.LabelSelector{
 				MatchLabels: labels,
