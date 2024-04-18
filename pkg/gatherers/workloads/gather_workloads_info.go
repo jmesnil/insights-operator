@@ -17,11 +17,16 @@ import (
 
 	"errors"
 
+	apimachinerywait "k8s.io/apimachinery/pkg/util/wait"
+
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
+	appsv1client "k8s.io/client-go/kubernetes/typed/apps/v1"
 	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
+
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/remotecommand"
 	"k8s.io/klog/v2"
@@ -43,6 +48,7 @@ const (
 	// limit the number of collected Pods in this gatherer. In the worst case, one Pod can add around 600 bytes (before compression)
 	// This limit can be removed in the future.
 	podsLimit = 8000
+	namespace = "openshift-insights"
 )
 
 // keys are namespace / pod / containerID and the final value is the workloadRuntimeInfoContainer for this container
@@ -90,25 +96,35 @@ func (g *Gatherer) GatherWorkloadInfo(ctx context.Context) ([]record.Record, []e
 		return nil, []error{err}
 	}
 
-	return gatherWorkloadInfo(ctx, gatherKubeClient.CoreV1(), gatherOpenShiftClient, imageConfig)
+	return gatherWorkloadInfo(ctx, gatherKubeClient, gatherOpenShiftClient, imageConfig)
 }
 
 func gatherWorkloadInfo(
 	ctx context.Context,
-	coreClient corev1client.CoreV1Interface,
+	clientSet *kubernetes.Clientset,
 	imageClient imageclient.ImageV1Interface,
 	restConfig *rest.Config,
 ) ([]record.Record, []error) {
 	h := sha256.New()
 
-	workloadRuntimeInfos = gatherWorkloadRuntimeInfos(ctx, h, coreClient, restConfig)
+	var errors = []error{}
+
+	coreClient := clientSet.CoreV1()
+	appClient := clientSet.AppsV1()
+
+	infos, err := gatherWorkloadRuntimeInfos(ctx, h, coreClient, appClient, restConfig)
+	if err != nil {
+		errors = append(errors, err)
+	}
+	workloadRuntimeInfos = infos
 
 	imageCh, imagesDoneCh := gatherWorkloadImageInfo(ctx, h, imageClient.Images())
 
 	start := time.Now()
 	limitReached, info, err := workloadInfo(ctx, coreClient, imageCh)
 	if err != nil {
-		return nil, []error{err}
+		errors = append(errors, err)
+		return nil, errors
 	}
 
 	workloadImageResize(info.PodCount)
@@ -124,9 +140,112 @@ func gatherWorkloadInfo(
 	handleWorkloadImageInfo(ctx, &info, start, imagesDoneCh)
 
 	if limitReached {
-		return records, []error{fmt.Errorf("the %d limit for number of pods gathered was reached", podsLimit)}
+		errors = append(errors, fmt.Errorf("the %d limit for number of pods gathered was reached", podsLimit))
+	}
+
+	if len(errors) > 0 {
+		return records, errors
 	}
 	return records, nil
+}
+
+func deployContainerScanner(ctx context.Context, coreClient corev1client.CoreV1Interface,
+	appClient appsv1client.AppsV1Interface) error {
+	klog.Infof("Deploy container scanner\n")
+
+	containeScannerDaemonSet := newContainerScannerDaemonSet()
+	return deployAndWaitForReadiness(ctx, coreClient, appClient, containeScannerDaemonSet, "app.kubernetes.io/name=container-scanner")
+}
+
+func deployAndWaitForReadiness(ctx context.Context, coreClient corev1client.CoreV1Interface,
+	appClient appsv1client.AppsV1Interface, daemonSet *appsv1.DaemonSet, selector string) error {
+	klog.Infof("Deploying container scanner...\n")
+
+	if _, err := appClient.DaemonSets(namespace).Create(ctx, daemonSet, metav1.CreateOptions{}); err != nil {
+		return err
+	}
+	klog.Infof("Container scanner deployed, waiting to be ready\n")
+	return apimachinerywait.PollUntilContextCancel(ctx, time.Second*5, true, podsReady(coreClient, selector))
+}
+
+// PodsReady is a helper function that can be used to check that the selected pods are ready
+func podsReady(coreClient corev1client.CoreV1Interface, selector string) apimachinerywait.ConditionWithContextFunc {
+	return func(ctx context.Context) (done bool, err error) {
+		klog.Infof("Check that container scanner pods are ready\n")
+		opts := metav1.ListOptions{
+			LabelSelector: selector,
+		}
+		pods, err := coreClient.Pods(namespace).List(ctx, opts)
+		if err != nil {
+			return false, err
+		}
+		for _, pod := range pods.Items {
+			for _, cond := range pod.Status.Conditions {
+				if cond.Type == corev1.PodReady && cond.Status == corev1.ConditionTrue {
+					done = true
+				}
+			}
+		}
+		return
+	}
+}
+
+func newContainerScannerDaemonSet() *appsv1.DaemonSet {
+	securityContextPrivileged := true
+	hostPathSocket := corev1.HostPathSocket
+	labels := map[string]string{"app.kubernetes.io/name": "container-scanner"}
+
+	return &appsv1.DaemonSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "container-scanner", Namespace: namespace},
+		Spec: appsv1.DaemonSetSpec{
+			Selector: &metav1.LabelSelector{
+				MatchLabels: labels,
+			},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: labels},
+				Spec: corev1.PodSpec{
+					ServiceAccountName: "container-scanner-sa",
+					HostPID:            true,
+					ImagePullSecrets: []corev1.LocalObjectReference{{
+						Name: "container-scanner-pull-secret",
+					}},
+					Containers: []corev1.Container{{
+						Name:            "container-scanner",
+						Image:           "quay.io/jmesnil/container-scanner:rust-latest",
+						ImagePullPolicy: corev1.PullAlways,
+						Env: []corev1.EnvVar{{
+							Name:  "CONTAINER_RUNTIME_ENDPOINT",
+							Value: "unix:///crio.sock",
+						}},
+						SecurityContext: &corev1.SecurityContext{
+							Privileged: &securityContextPrivileged,
+							Capabilities: &corev1.Capabilities{
+								Drop: []corev1.Capability{"ALL"},
+								Add:  []corev1.Capability{"CAP_SYS_ADMIN"},
+							}},
+						VolumeMounts: []corev1.VolumeMount{{
+							MountPath: "/crio.sock",
+							Name:      "crio-socket",
+						}},
+					}},
+					Volumes: []corev1.Volume{{
+						Name: "crio-socket",
+						VolumeSource: corev1.VolumeSource{
+							HostPath: &corev1.HostPathVolumeSource{
+								Path: "/run/crio/crio.sock",
+								Type: &hostPathSocket,
+							},
+						}}},
+				},
+			},
+		},
+	}
+}
+
+func undeployContainerScanner(ctx context.Context, coreClient corev1client.CoreV1Interface) error {
+	klog.Infof("Undeploy container scanner\n")
+
+	return nil
 }
 
 // nolint: funlen, gocritic, gocyclo
@@ -540,9 +659,18 @@ func gatherWorkloadRuntimeInfos(
 	ctx context.Context,
 	h hash.Hash,
 	coreClient corev1client.CoreV1Interface,
+	appClient appsv1client.AppsV1Interface,
 	restConfig *rest.Config,
-) workloadRuntimes {
+) (workloadRuntimes, error) {
 	start := time.Now()
+
+	workloadRuntimeInfos := make(workloadRuntimes)
+
+	err := deployContainerScanner(ctx, coreClient, appClient)
+	if err != nil {
+		return workloadRuntimeInfos, err
+	}
+	klog.Infof("Container Scanner deployed and ready")
 
 	containerScannerPods := getContainerScannerPods(coreClient, restConfig, ctx)
 
@@ -562,16 +690,19 @@ func gatherWorkloadRuntimeInfos(
 		close(nodeWorkloadCh)
 	}()
 
-	workloadRuntimeInfos := make(workloadRuntimes)
-
 	for infos := range nodeWorkloadCh {
 		mergeWorkloads(workloadRuntimeInfos, infos)
+	}
+
+	err = undeployContainerScanner(ctx, coreClient)
+	if err != nil {
+		return workloadRuntimeInfos, err
 	}
 
 	klog.Infof("Gather workload runtime infos in %s\n",
 		time.Since(start).Round(time.Second).String())
 
-	return workloadRuntimeInfos
+	return workloadRuntimeInfos, nil
 }
 
 // Get all WorkloadRuntimeInfos for a single Node (using the container scanner pod running on this node)
@@ -584,7 +715,7 @@ func getNodeWorkloadRuntimeInfos(h hash.Hash,
 
 	req := coreClient.RESTClient().
 		Post().
-		Namespace("openshift-insights").
+		Namespace(namespace).
 		Name(containerScannerPod).
 		Resource("pods").
 		SubResource("exec").
@@ -702,7 +833,6 @@ func getContainerScannerPods(
 	restConfig *rest.Config,
 	ctx context.Context,
 ) map[string]string {
-	namespace := "openshift-insights"
 	labelSelector := "app.kubernetes.io/name=container-scanner"
 
 	containerScannerPods := make(map[string]string)
