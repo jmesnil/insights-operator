@@ -61,7 +61,7 @@ func gatherWorkloadRuntimeInfos(
 		go func(nodeName string, containerScannerPod string) {
 			defer wg.Done()
 			klog.Infof("Gathering workload runtime info for node %s...\n", nodeName)
-			nodeWorkloadCh <- getNodeWorkloadRuntimeInfos(h, coreClient, restConfig, containerScannerPod)
+			nodeWorkloadCh <- getNodeWorkloadRuntimeInfos(ctx, h, coreClient, restConfig, containerScannerPod)
 		}(nodeName, containerScannerPod)
 	}
 	go func() {
@@ -267,7 +267,9 @@ func transformWorkload(h hash.Hash,
 }
 
 // Get all WorkloadRuntimeInfos for a single Node (using the container scanner pod running on this node)
-func getNodeWorkloadRuntimeInfos(h hash.Hash,
+func getNodeWorkloadRuntimeInfos(
+	ctx context.Context,
+	h hash.Hash,
 	coreClient corev1client.CoreV1Interface,
 	restConfig *rest.Config,
 	containerScannerPod string,
@@ -295,7 +297,7 @@ func getNodeWorkloadRuntimeInfos(h hash.Hash,
 		execErr bytes.Buffer
 	)
 
-	err = exec.Stream(remotecommand.StreamOptions{
+	err = exec.StreamWithContext(ctx, remotecommand.StreamOptions{
 		Stdout: &execOut,
 		Stderr: &execErr,
 		Tty:    false,
@@ -305,7 +307,7 @@ func getNodeWorkloadRuntimeInfos(h hash.Hash,
 		fmt.Printf("command error output: %s\n", execErr.String())
 		fmt.Printf("command output: %s\n", execOut.String())
 	} else if execErr.Len() > 0 {
-		fmt.Errorf("command execution got stderr: %v", execErr.String())
+		fmt.Printf("command execution got stderr: %s", execErr.String())
 	}
 
 	scannerOutput := execOut.String()
