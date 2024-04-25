@@ -113,9 +113,14 @@ type workloadRuntimeInfoContainer struct {
 	KindVersion string `json:"kindVersion,omitempty"`
 	// Entity that provides the runtime-kind implementation
 	KindImplementer string `json:"kindImplementer,omitempty"`
-	// Name of the runtime used to run the application in the container
+	// Runtimes components
+	Runtimes []RuntimeComponent `json:"runtimes,omitempty"`
+}
+
+type RuntimeComponent struct {
+	// Name of a runtime used to run the application in the container
 	Name string `json:"name,omitempty"`
-	// The version of the runtime used to run the application
+	// The version of this runtime
 	Version string `json:"version,omitempty"`
 }
 
