@@ -146,6 +146,11 @@ func (c *ConfigAggregator) mergeDataReporting(defaultCfg, newCfg *config.Insight
 	if len(newCfg.DataReporting.Obfuscation) > 0 {
 		defaultCfg.DataReporting.Obfuscation = append(defaultCfg.DataReporting.Obfuscation, newCfg.DataReporting.Obfuscation...)
 	}
+
+	if newCfg.DataReporting.WorkloadRuntimeDisabled {
+		defaultCfg.DataReporting.WorkloadRuntimeDisabled = newCfg.DataReporting.WorkloadRuntimeDisabled
+	}
+
 }
 
 func (c *ConfigAggregator) mergeAlerting(defaultCfg, newCfg *config.InsightsConfiguration) {
@@ -267,10 +272,11 @@ func (c *ConfigAggregator) legacyConfigToInsightsConfiguration() *config.Insight
 			// This can't be overridden by the config map - it's not merged in the merge function.
 			// The value is based on the presence of the token in the pull-secret and the config map
 			// doesn't know anything about secrets
-			Enabled:            legacyConfig.Report,
-			StoragePath:        legacyConfig.StoragePath,
-			ReportPullingDelay: legacyConfig.ReportPullingDelay,
-			Obfuscation:        obfuscation,
+			Enabled:                 legacyConfig.Report,
+			StoragePath:             legacyConfig.StoragePath,
+			ReportPullingDelay:      legacyConfig.ReportPullingDelay,
+			Obfuscation:             obfuscation,
+			WorkloadRuntimeDisabled: legacyConfig.WorkloadRuntimeDisabled,
 		},
 		Alerting: config.Alerting{
 			Disabled: legacyConfig.DisableInsightsAlerts,

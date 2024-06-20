@@ -20,6 +20,7 @@ func (i *InsightsConfigurationSerialized) ToConfig() *InsightsConfiguration {
 			ConditionalGathererEndpoint: i.DataReporting.ConditionalGathererEndpoint,
 			ProcessingStatusEndpoint:    i.DataReporting.ProcessingStatusEndpoint,
 			Obfuscation:                 i.DataReporting.Obfuscation,
+			WorkloadRuntimeDisabled:     i.DataReporting.WorkloadRuntimeDisabled,
 		},
 		SCA: SCA{
 			Endpoint: i.SCA.Endpoint,
@@ -77,13 +78,15 @@ func (d *DataReporting) String() string {
 		storagePath: %s,
 		downloadEndpoint: %s, 
 		conditionalGathererEndpoint: %s,
-		obfuscation: %s`,
+		obfuscation: %s,
+		workloadRuntimeDisabled: %t`,
 		d.Interval,
 		d.UploadEndpoint,
 		d.StoragePath,
 		d.DownloadEndpoint,
 		d.ConditionalGathererEndpoint,
-		d.Obfuscation)
+		d.Obfuscation,
+		d.WorkloadRuntimeDisabled)
 	return s
 }
 

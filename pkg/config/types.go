@@ -33,6 +33,7 @@ type DataReportingSerialized struct {
 	ConditionalGathererEndpoint string      `json:"conditionalGathererEndpoint,omitempty"`
 	ProcessingStatusEndpoint    string      `json:"processingStatusEndpoint,omitempty"`
 	Obfuscation                 Obfuscation `json:"obfuscation,omitempty"`
+	WorkloadRuntimeDisabled     bool        `json:"workloadRuntimeDisabled,omitempty"`
 }
 
 type AlertingSerialized struct {
@@ -81,6 +82,7 @@ type DataReporting struct {
 	ReportPullingDelay          time.Duration
 	ProcessingStatusEndpoint    string
 	Obfuscation                 Obfuscation
+	WorkloadRuntimeDisabled     bool
 }
 
 // Alerting is a helper type for configuring Insights alerting

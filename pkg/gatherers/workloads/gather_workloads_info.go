@@ -29,6 +29,7 @@ import (
 	"github.com/openshift/library-go/pkg/image/imageutil"
 	"github.com/openshift/library-go/pkg/image/reference"
 
+	"github.com/openshift/insights-operator/pkg/config"
 	"github.com/openshift/insights-operator/pkg/gatherers/common"
 	"github.com/openshift/insights-operator/pkg/record"
 )
@@ -86,11 +87,12 @@ func (g *Gatherer) GatherWorkloadInfo(ctx context.Context) ([]record.Record, []e
 		return nil, []error{err}
 	}
 
-	return gatherWorkloadInfo(ctx, gatherKubeClient.CoreV1(), gatherOpenShiftClient, imageConfig)
+	return gatherWorkloadInfo(ctx, g.config, gatherKubeClient.CoreV1(), gatherOpenShiftClient, imageConfig)
 }
 
 func gatherWorkloadInfo(
 	ctx context.Context,
+	config *config.InsightsConfiguration,
 	coreClient corev1client.CoreV1Interface,
 	imageClient imageclient.ImageV1Interface,
 	restConfig *rest.Config,
@@ -99,11 +101,15 @@ func gatherWorkloadInfo(
 
 	var errors = []error{}
 
-	infos, err := gatherWorkloadRuntimeInfos(ctx, h, coreClient, restConfig)
-	if err != nil {
-		errors = append(errors, err)
+	fmt.Printf("Config: %s\n", &config.DataReporting)
+
+	if !config.DataReporting.WorkloadRuntimeDisabled {
+		infos, err := gatherWorkloadRuntimeInfos(ctx, h, coreClient, restConfig)
+		if err != nil {
+			errors = append(errors, err)
+		}
+		workloadRuntimeInfos = infos
 	}
-	workloadRuntimeInfos = infos
 
 	imageCh, imagesDoneCh := gatherWorkloadImageInfo(ctx, h, imageClient.Images())
 

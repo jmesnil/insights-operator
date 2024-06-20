@@ -19,4 +19,5 @@ ocm:
   scaInterval: "8h"
   clusterTransferEndpoint: https://api.openshift.com/api/accounts_mgmt/v1/cluster_transfers/
   clusterTransferInterval: "12h"
+#workloadRuntimeDisabled: true
 

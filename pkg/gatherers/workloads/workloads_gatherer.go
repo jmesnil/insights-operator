@@ -6,6 +6,7 @@ import (
 
 	"k8s.io/client-go/rest"
 
+	"github.com/openshift/insights-operator/pkg/config"
 	"github.com/openshift/insights-operator/pkg/gatherers"
 	"github.com/openshift/insights-operator/pkg/record"
 	"github.com/openshift/insights-operator/pkg/utils"
@@ -17,13 +18,15 @@ type Gatherer struct {
 	gatherKubeConfig      *rest.Config
 	gatherProtoKubeConfig *rest.Config
 	lastProcessingTime    time.Time
+	config                *config.InsightsConfiguration
 }
 
-func New(gatherKubeConfig, gatherProtoKubeConfig *rest.Config) *Gatherer {
+func New(gatherKubeConfig, gatherProtoKubeConfig *rest.Config, config *config.InsightsConfiguration) *Gatherer {
 	return &Gatherer{
 		gatherKubeConfig:      gatherKubeConfig,
 		gatherProtoKubeConfig: gatherProtoKubeConfig,
 		lastProcessingTime:    time.Unix(0, 0),
+		config:                config,
 	}
 }
 

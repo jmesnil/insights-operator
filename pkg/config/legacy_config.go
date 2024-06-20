@@ -34,6 +34,7 @@ type Serialized struct {
 	DisableInsightsAlerts     bool   `json:"disableInsightsAlerts"`
 	ProcessingStatusEndpoint  string `json:"processingStatusEndpoint"`
 	ReportEndpointTechPreview string `json:"reportEndpointTechPreview"`
+	WorkloadRuntimeDisabled   bool   `json:"workloadRuntimeDisabled"`
 }
 
 // Controller defines the standard config for this operator.
@@ -61,6 +62,8 @@ type Controller struct {
 	// DisableInsightsAlerts disabled exposing of Insights recommendations as Prometheus info alerts
 	DisableInsightsAlerts    bool
 	ProcessingStatusEndpoint string
+
+	WorkloadRuntimeDisabled bool
 }
 
 // HTTPConfig configures http proxy and exception settings if they come from config
@@ -92,7 +95,8 @@ func (c *Controller) ToString() string {
 		"initialPollingDelay=%s "+
 		"minRetryTime=%s "+
 		"pollingTimeout=%s "+
-		"processingStatusEndpoint=%s",
+		"processingStatusEndpoint=%s"+
+		"workloadRuntimeDisabled=%t",
 		c.Report,
 		c.Endpoint,
 		c.ConditionalGathererEndpoint,
@@ -102,7 +106,8 @@ func (c *Controller) ToString() string {
 		c.ReportPullingDelay,
 		c.ReportMinRetryTime,
 		c.ReportPullingTimeout,
-		c.ProcessingStatusEndpoint)
+		c.ProcessingStatusEndpoint,
+		c.WorkloadRuntimeDisabled)
 }
 
 func (c *Controller) MergeWith(cfg *Controller) {
@@ -278,6 +283,9 @@ func ToController(s *Serialized, cfg *Controller) (*Controller, error) { // noli
 		}
 		cfg.OCMConfig.ClusterTransferInterval = i
 	}
+
+	cfg.WorkloadRuntimeDisabled = s.WorkloadRuntimeDisabled
+
 	return cfg, nil
 }
 
@@ -293,6 +301,7 @@ func ToDisconnectedController(s *Serialized, cfg *Controller) (*Controller, erro
 	cfg.EnableGlobalObfuscation = s.EnableGlobalObfuscation
 	cfg.ConditionalGathererEndpoint = s.ConditionalGathererEndpoint
 	cfg.DisableInsightsAlerts = s.DisableInsightsAlerts
+	cfg.WorkloadRuntimeDisabled = s.WorkloadRuntimeDisabled
 
 	if len(s.Interval) > 0 {
 		d, err := time.ParseDuration(s.Interval)
