@@ -2,6 +2,8 @@ package workloads
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -58,7 +60,7 @@ func gatherWorkloadRuntimeInfos(
 		go func(podInfo podWithNodeName) {
 			defer wg.Done()
 			klog.Infof("Gathering workload runtime info for node %s...\n", podInfo.nodeName)
-			extractorURL := fmt.Sprintf("http://%s:8000/gather_runtime_info", podInfo.podIP)
+			extractorURL := fmt.Sprintf("https://%s:8000/gather_runtime_info", podInfo.podIP)
 			nodeWorkloadCh <- getNodeWorkloadRuntimeInfos(ctx, extractorURL)
 		}(runtimePodIPs[i])
 	}
@@ -124,13 +126,41 @@ func getNodeWorkloadRuntimeInfos(
 ) workloadRuntimesResult {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
+
+	// Read the token for the operator service account
+	token, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/token")
+	if err != nil {
+		return workloadRuntimesResult{
+			Error: err,
+		}
+	}
+
+	caCert, err := os.ReadFile("/var/run/configmaps/service-ca-bundle/service-ca.crt")
+	if err != nil {
+		return workloadRuntimesResult{
+			Error: err,
+		}
+	}
+	caCertPool := x509.NewCertPool()
+	caCertPool.AppendCertsFromPEM(caCert)
+
+	authClient := &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: false,
+				RootCAs:            caCertPool,
+				ServerName:         "exporter.openshift-insights.svc.cluster.local",
+			},
+		},
+	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, url, http.NoBody)
 	if err != nil {
 		return workloadRuntimesResult{
 			Error: err,
 		}
 	}
-	resp, err := http.DefaultClient.Do(request)
+	request.Header.Set("Authorization", "Bearer "+string(token))
+	resp, err := authClient.Do(request)
 	if err != nil {
 		return workloadRuntimesResult{
 			Error: err,
